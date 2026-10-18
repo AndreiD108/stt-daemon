@@ -18,6 +18,7 @@ Use this tree as a map — scan it to find the parts your task touches, then go 
     ci.yml                ruff, pyright, pytest (unit + integration) on push and PR
 docs/                     agent- and client-facing docs
   protocol.md             wire protocol: every command and event
+  media/                  README GIFs: hero (listen), client (socket lines + app view), backends (cloud vs local)
 src/                      package source
   stt_daemon/             the `stt-daemon` package
     __init__.py           __version__ from package metadata
@@ -116,6 +117,7 @@ tests/
   live/                   opt-in (`pytest -m live`): real mic, real backend key
     test_elevenlabs_live.py  fixture to real EL: word times at the speech edges, padded tail, bad key
 pyproject.toml            package, deps, ruff/pyright/pytest settings
+README.md                 public README: pitch, client features, install, backends
 ```
 <!-- END FILE TREE -->
 
