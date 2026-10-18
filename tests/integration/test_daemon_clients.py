@@ -26,6 +26,18 @@ async def test_another_protocol_is_refused(daemon: Harness) -> None:
     await asyncio.wait_for(client.eof.wait(), 2)
 
 
+async def test_observers_can_be_switched_off(daemon: Harness) -> None:
+    config = Config()
+    config.server.observers = False
+    await daemon.start(config=config)
+    client = await daemon.raw()
+    reply = await client.request("hello", {"protocol": 1, "observe_all": True})
+    assert reply["data"]["code"] == "observers_disabled"
+    await asyncio.wait_for(client.eof.wait(), 2)
+    _, welcome = await daemon.connect("Talkey")
+    assert welcome["type"] == "welcome"
+
+
 async def test_welcome_describes_the_daemon(daemon: Harness) -> None:
     await daemon.start()
     _, welcome = await daemon.connect("Talkey")

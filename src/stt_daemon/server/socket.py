@@ -197,6 +197,11 @@ class Server:
                     "protocol", f"the first message must be hello, with protocol: {PROTOCOL}"
                 )
             hello = parse_hello(message.data)
+            if hello.observe_all and not self.setup.config.server.observers:
+                raise RequestError(
+                    "observers_disabled",
+                    "the config has server.observers = false; connect without observe_all",
+                )
         except RequestError as exc:
             conn.send("error", exc.to_wire(), message.id)
             return False

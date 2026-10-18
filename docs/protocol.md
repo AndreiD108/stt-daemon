@@ -48,12 +48,13 @@ events, send `stop_session`, read `session_ended`. Error codes are in [Error cod
 - `label` (optional): shown to other clients in `slot`; also scopes `context_key`. `""` is no
   label.
 - `observe_all` (optional, default false): receive every session event of every client, like a log.
-  See [Observers](#observers).
+  See [Observers](#observers). Refused with `observers_disabled` when the daemon's config has
+  `server.observers = false`.
 - `vad_events` (optional, default false): receive `speech_started` and `speech_ended`; see
   [VAD events](#vad-events).
 
 Reply: `welcome`. Or, and the daemon closes the connection: `error {code: "protocol_unsupported",
-supported: [1]}`, or `bad_request` for a field of the wrong type. A second `hello` gets
+supported: [1]}`, `observers_disabled`, or `bad_request` for a field of the wrong type. A second `hello` gets
 `bad_request`.
 
 ### `start_session`
@@ -390,6 +391,7 @@ Codes of `error` replies, and of `session_error` for the backend codes.
 | --- | --- | --- |
 | `protocol` | first message | Not `hello`. Reconnect and send `hello` first. |
 | `protocol_unsupported` | `hello` | `supported` lists the daemon's protocol versions. |
+| `observers_disabled` | `hello` | The config has `server.observers = false`; connect without `observe_all`. |
 | `bad_request` | any | Not a valid message or command; `field` names a field of the wrong type. |
 | `busy` | `start_session` | Another client holds the slot; `slot` has it. Wait for a `slot` event with `idle` or `evictable`. |
 | `session_active` | `start_session` | This client already holds a session; `slot` has it. Stop it first. |
@@ -465,3 +467,9 @@ session asked for), and the VAD events during sessions. It maps `session_id` to 
 the client fields on `session_started`. Copies sent to observers have no `reply_to`, since ids
 belong to the connection that sent the command. An observer gets its own session's events once,
 as the holder, with `reply_to` on the replies to its commands.
+
+Observers see other clients' transcripts. That is the normal desktop model: the socket is reachable
+by the user's own processes, which can already read the user's files, clipboard and windows, so the
+trust boundary is the user account, and an observer opens no hole that wasn't there. A user who
+wants no observers sets `server.observers = false` in `config.toml`; `hello` with `observe_all`
+then gets `observers_disabled`.

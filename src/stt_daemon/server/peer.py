@@ -1,8 +1,7 @@
 """Who is on the other end of a Unix socket: the peer's pid and command line, from the kernel.
 
 Linux: `SO_PEERCRED`, then `/proc/<pid>/cmdline`. macOS: `LOCAL_PEERPID`, then the process
-table (`KERN_PROCARGS2`); written to the documented layout, untested. Anything else, or any
-failure: unknown fields, never an error.
+table (`KERN_PROCARGS2`). Anything else, or any failure: unknown fields, never an error.
 """
 
 import ctypes

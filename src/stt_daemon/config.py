@@ -58,6 +58,12 @@ class SlotConfig:
 
 
 @dataclass
+class ServerConfig:
+    observers: bool = True
+    """Whether a client may say `observe_all: true` and get every session's events."""
+
+
+@dataclass
 class ElevenLabsConfig:
     model_id: str = "scribe_v2_realtime"
     endpoint: str = "wss://api.elevenlabs.io/v1/speech-to-text/realtime"
@@ -90,6 +96,7 @@ class Config:
     vad: VadConfig = field(default_factory=VadConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
     slot: SlotConfig = field(default_factory=SlotConfig)
+    server: ServerConfig = field(default_factory=ServerConfig)
     backends: BackendsConfig = field(default_factory=BackendsConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 

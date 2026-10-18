@@ -61,7 +61,7 @@ src/                      package source
       __init__.py         empty package marker
       common.py           Runner (injectable for tests), ServiceError, the installed stt-daemon script's path
       systemd.py          unit and limits.conf rendering, ExecStart escaping; install/remove/status/logs
-      launchd.py          macOS agent plist (TMPDIR kept for the socket); launchctl calls; untested on a Mac
+      launchd.py          macOS agent plist (TMPDIR kept for the socket); launchctl calls
       preflight.py        PortAudio load check; install command per distro from /etc/os-release
     cli.py                `stt-daemon` entry point: run, service, key set, backend set-default/install, listen
     control.py            one blocking request to the running daemon (hello, command, reply); `reload` after key set

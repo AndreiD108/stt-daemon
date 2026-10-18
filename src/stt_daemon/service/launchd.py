@@ -1,4 +1,4 @@
-"""The macOS launchd agent (untested on a Mac)."""
+"""The macOS launchd agent."""
 
 import os
 import plistlib
