@@ -18,6 +18,7 @@ from pathlib import Path
 
 from .. import __version__
 from ..audio.capture import CaptureSource, CaptureUnavailable
+from ..audio.vad import VadEvent
 from ..backends.base import OpenFailed
 from ..config import ConfigError
 from ..credentials import CredentialsError
@@ -39,6 +40,7 @@ from .messages import (
 )
 from .peer import peer_of
 from .slot import Client, ClientGone, Slot, SlotState, StartRefused
+from .speech import SpeechWatch
 
 log = logging.getLogger(__name__)
 
@@ -119,6 +121,10 @@ class Server:
             on_change=self._slot_changed,
             on_event=self._session_event,
         )
+        self._buffer_ms = config.audio.buffer_ms
+        self._speech = SpeechWatch(
+            capture=capture, vad=config.vad, buffer_ms=self._buffer_ms, on_event=self._vad_event
+        )
 
     async def start(self) -> None:
         """Binds the socket. Raises `SocketInUse` when another daemon listens on it."""
@@ -131,6 +137,7 @@ class Server:
         finally:
             os.umask(umask)
         os.chmod(self.path, 0o600)
+        self._speech.start()
         log.info("listening on %s", self.path)
 
     async def close(self) -> None:
@@ -138,6 +145,7 @@ class Server:
         self._closing = True  # before any await: no connection gets a worker from now on
         if self._server is not None:
             self._server.close()
+        await self._speech.close()
         workers = [c.worker for c in self._connections if c.worker is not None]
         for worker in workers:
             worker.cancel()
@@ -273,9 +281,17 @@ class Server:
 
     async def _start(self, conn: _Connection, message: Message, arrived: float) -> None:
         request = parse_start(message.data)
-        if request.speech_id is not None:
-            raise RequestError("unsupported", "speech_id starts are not available yet")
         setup = self.setup
+        since = None
+        if request.speech_id is not None:
+            speech_start = self._speech.start_of(request.speech_id)
+            if speech_start is None:
+                raise RequestError(
+                    "speech_expired",
+                    f"speech {request.speech_id} is unknown or left the audio buffer; "
+                    "start without speech_id",
+                )
+            since = speech_start - setup.config.vad.pause_keep_ms / 1000
         cid = conn.client.client_id
         scope = scope_of(cid, conn.client.label)
 
@@ -298,6 +314,7 @@ class Server:
                 conn.client,
                 make_session=make_session,
                 session_label=request.label,
+                since=since,
                 requested_at=arrived,
             )
         except StartRefused as exc:
@@ -394,6 +411,19 @@ class Server:
         run.conn.send(kind, data, reply_to)
         for conn in self._welcomed.values():
             if conn.observe_all and conn is not run.conn:
+                conn.send(kind, data)
+
+    def _vad_event(self, event: VadEvent) -> None:
+        self._slot.heard(event)
+        kind, data = wire.vad_event(event, self._buffer_ms)
+        holder = self._slot.state.holder
+        for conn in self._welcomed.values():
+            if holder is None:
+                wanted = conn.vad_events
+            else:
+                is_holder = conn.client.client_id == holder.client_id
+                wanted = conn.observe_all or (is_holder and conn.vad_events)
+            if wanted:
                 conn.send(kind, data)
 
     def _remember(self, client: Client, run: _Running, ended: SessionEnded) -> None:

@@ -62,8 +62,8 @@ Reply: `welcome`, or `error {code: "protocol_unsupported", supported: [1]}` and 
 All fields optional.
 
 - `label`: the session's own label, next to the client's.
-- `speech_id`: start the session's audio where that speech began (from `speech_started`), not
-  at the command. Without it, the session's audio starts 1 s before the command arrived when the
+- `speech_id`: start the session's audio where that speech began (from `speech_started`), less
+  a short pad (config `vad.pause_keep_ms`, 100 ms), not at the command. Without it, the session's audio starts 1 s before the command arrived when the
   mic is kept open, and when the mic is ready otherwise. Either way that point is `started_at`.
 - `backend`: default `default_backend` from `welcome`.
 - `language`: a code from the backend's list, or `"auto"` (detect). Default: the backend's

@@ -116,6 +116,10 @@ class CaptureSource(ABC):
             raise CaptureUnavailable("the mic is not open")
         return self._hub.attach(since)
 
+    def listen(self) -> Attachment:
+        """Live frames from now on, whenever the source is open; no hold, no open check."""
+        return self._hub.attach(time.monotonic())
+
     def ring_since(self, since: float | None = None) -> list[Frame]:
         return self._hub.ring_since(since)
 

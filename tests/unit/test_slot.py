@@ -11,6 +11,7 @@ from fake_elevenlabs import wait_until
 
 from stt_daemon.audio.capture import CaptureSource
 from stt_daemon.audio.frames import Attachment
+from stt_daemon.audio.vad import SpeechEnded, SpeechStarted
 from stt_daemon.audio.wav_capture import WavCapture
 from stt_daemon.backends.base import OpenFailed, OpenOptions
 from stt_daemon.backends.fake import FakeBackend
@@ -192,39 +193,34 @@ async def test_next_session_starts_where_the_previous_audio_ended(silent: SpyCap
     assert second.started_at >= first.started_at + ended.duration_ms - 25
 
 
-async def test_quiet_session_turns_evictable_and_speech_does_not_undo_it() -> None:
-    capture = WavCapture(FIXTURE)  # speech from 1.0 s
-    await capture.start()
-    try:
-        h = Harness(capture, evictable_after_s=0.3)
-        await h.start(A)
-        session = h.slot.session_of("c1")
-        assert session is not None
-        await h.evictable()
-        assert session.last_speech_at is None
-        await wait_until(lambda: session.last_speech_at is not None, 3.0)
-        await asyncio.sleep(0.5)
-        assert [c.state for c in h.changes] == ["busy", "evictable"]
-        assert h.slot.state.state == "evictable"
-        await session.stop()
-    finally:
-        await capture.stop()
+async def test_quiet_session_turns_evictable_and_speech_does_not_undo_it(
+    silent: SpyCapture,
+) -> None:
+    h = Harness(silent, evictable_after_s=0.3)
+    await h.start(A)
+    await h.evictable()
+    assert h.slot.state.holder is not None
+    assert h.slot.state.holder.last_speech_at is None
+    h.slot.heard(SpeechStarted("s1", time.monotonic()))
+    await asyncio.sleep(0.5)
+    assert [c.state for c in h.changes] == ["busy", "evictable"]
+    assert h.slot.state.state == "evictable"
 
 
-async def test_speech_keeps_the_slot_busy() -> None:
-    capture = WavCapture(FIXTURE)  # speech at 1.00 to 3.74 s
-    await capture.start()
-    try:
-        h = Harness(capture, evictable_after_s=1.5)
-        await h.start(A)
-        session = h.slot.session_of("c1")
-        assert session is not None
-        await asyncio.sleep(3.5)
-        assert h.slot.state.state == "busy"
-        await wait_until(lambda: h.slot.state.state == "evictable", 4.0)
-        await session.stop()
-    finally:
-        await capture.stop()
+async def test_speech_from_the_daemon_vad_keeps_the_slot_busy(silent: SpyCapture) -> None:
+    h = Harness(silent, evictable_after_s=0.4)
+    await h.start(A)
+    h.slot.heard(SpeechStarted("s1", time.monotonic() - 1.0))  # began before the session
+    await asyncio.sleep(0.6)
+    assert h.slot.state.state == "busy"
+    holder = h.slot.state.holder
+    assert holder is not None
+    assert holder.last_speech_at is not None
+    assert abs(holder.last_speech_at / 1000 - time.time()) < 0.1  # now, while speech goes on
+    ended_at = time.monotonic()
+    h.slot.heard(SpeechEnded("s1", ended_at))
+    await h.evictable()
+    assert time.monotonic() - ended_at >= 0.4 - 0.01
 
 
 async def test_takeover_order(silent: SpyCapture) -> None:

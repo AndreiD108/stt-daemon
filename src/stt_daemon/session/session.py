@@ -16,7 +16,7 @@ from typing import Literal
 import numpy as np
 
 from ..audio.capture import CaptureSource
-from ..audio.frames import Attachment, Frame
+from ..audio.frames import Attachment, Frame, epoch_ms
 from ..audio.vad import WINDOW, SpeechEnded, StreamingVAD
 from ..backends.base import Backend, CommitPolicy, Committed, OpenOptions
 from ..config import Config
@@ -94,7 +94,6 @@ class Session:
         self._boundary_s: dict[int, float] = {}
         self._speech_since_commit = False
         self._last_commit_at = 0.0
-        self._last_speech_at: float | None = None
         self._audio_task: asyncio.Task[None] | None = None
         self._commit_task: asyncio.Task[None] | None = None
         self._ending_task: asyncio.Task[None] | None = None
@@ -104,11 +103,6 @@ class Session:
     @property
     def state(self) -> State:
         return self._state
-
-    @property
-    def last_speech_at(self) -> float | None:
-        """Monotonic time speech was last heard; the latest audio while speech goes on."""
-        return self.audio_end if self._vad.speech_id is not None else self._last_speech_at
 
     async def start(
         self, *, since: float | None = None, attachment: Attachment | None = None
@@ -147,7 +141,7 @@ class Session:
             attachment.detach()
             await self._capture.release()
             raise
-        started_at = round((time.time() - (time.monotonic() - origin)) * 1000)
+        started_at = epoch_ms(origin)
         self.started = SessionStarted(
             self.session_id,
             self._backend.name,
@@ -228,8 +222,6 @@ class Session:
             frame = part
         self.audio_end = frame.end
         events = self._vad.push(frame)
-        for event in events:
-            self._last_speech_at = event.at
         for part in self._gate.push(frame, events):
             self._queue(part)
         policy = self._backend.capabilities.commit_policy

@@ -13,6 +13,15 @@ import numpy.typing as npt
 Samples = npt.NDArray[np.float32]
 
 
+_WALL_OFFSET_S = time.time() - time.monotonic()
+
+
+def epoch_ms(mono: float) -> int:
+    """A monotonic time as epoch ms; one offset for the process, so wall clock jumps don't move
+    one event against another."""
+    return round((mono + _WALL_OFFSET_S) * 1000)
+
+
 @dataclass(frozen=True)
 class Frame:
     """Mono float32 samples; `end` is the monotonic time the last sample arrived."""

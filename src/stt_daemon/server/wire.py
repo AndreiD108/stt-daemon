@@ -1,5 +1,7 @@
-"""Session events as protocol events: (type, data)."""
+"""Session and VAD events as protocol events: (type, data)."""
 
+from ..audio.frames import epoch_ms
+from ..audio.vad import SpeechStarted, VadEvent
 from ..session.events import (
     PartialText,
     SessionEnded,
@@ -55,6 +57,17 @@ def session_event(
                     "client_label": by.client_label,
                 }
             return "session_ended", data
+
+
+def vad_event(event: VadEvent, buffer_ms: int) -> Wire:
+    at = epoch_ms(event.at)
+    if isinstance(event, SpeechStarted):
+        return "speech_started", {
+            "speech_id": event.speech_id,
+            "at": at,
+            "expires_at": at + buffer_ms,
+        }
+    return "speech_ended", {"speech_id": event.speech_id, "at": at}
 
 
 def segment(seg: Segment, session_id: str) -> dict[str, object]:

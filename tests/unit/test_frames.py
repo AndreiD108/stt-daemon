@@ -5,7 +5,7 @@ import time
 import numpy as np
 import pytest
 
-from stt_daemon.audio.frames import Attachment, Frame, FrameHub
+from stt_daemon.audio.frames import Attachment, Frame, FrameHub, epoch_ms
 
 RATE = 16000
 CHUNK = 512
@@ -133,3 +133,13 @@ async def test_attach_while_pushing_sees_each_frame_once() -> None:
     for attachment in attachments:
         seen = [int(f.samples[0]) for f in await _drain(attachment.queue)]
         assert seen == list(range(seen[0], seen[0] + len(seen)))
+
+
+def test_epoch_times_keep_their_spacing_when_the_wall_clock_jumps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before = epoch_ms(100.0)
+    real_time = time.time
+    monkeypatch.setattr(time, "time", lambda: real_time() + 3600)
+    assert epoch_ms(100.0) == before
+    assert epoch_ms(101.5) - before == 1500

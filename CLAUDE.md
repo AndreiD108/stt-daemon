@@ -26,7 +26,7 @@ src/                      package source
       frames.py           Frame, ring + attachments (FrameHub); one lock so attach sees each frame once
       capture.py          CaptureSource base (keep-open vs per-session holds), MicCapture: PortAudio, watchdog
       wav_capture.py      WavCapture: WAV files in real time, silence between; mic stand-in for tests
-      vad.py              StreamingVAD: sherpa-onnx silero per window, own debounce, true edge times
+      vad.py              StreamingVAD: sherpa-onnx silero per window, own debounce, low-threshold edge lookback
       silero_vad.onnx     bundled silero VAD model (from sherpa-onnx releases)
       silero_vad.LICENSE  its MIT license
     backends/             transcription backends behind one interface; BACKENDS registry in __init__
@@ -39,9 +39,10 @@ src/                      package source
       __init__.py         empty package marker
       socket.py           Server: socket file, hello gate, per-connection command order, routing, reload, shutdown
       messages.py         JSONL envelope; per-command field checks → bad_request / invalid naming the field
-      wire.py             session events → protocol event data (words, after_word only when asked)
+      wire.py             session and VAD events → protocol event data (words, after_word only when asked)
       backend_set.py      Setup: backends set up here, default; resolve a start (language, features, hints)
       slot.py             Slot: idle/busy/evictable, sticky evictable timer, takeover order, slot changes
+      speech.py           SpeechWatch: daemon-wide VAD on all mic audio; VAD events, speech starts by id
       peer.py             socket peer's pid and cmdline: SO_PEERCRED + /proc; macOS LOCAL_PEERPID + KERN_PROCARGS2
     session/              one session: capture → VAD → pause cutting → backend → segments
       __init__.py         empty package marker
@@ -71,7 +72,8 @@ tests/
     test_frames.py        ring order, since-trimming, eviction, multi-attach, attach atomicity
     test_capture.py       device choice, holds, callback, stall/status recovery, backoff, hung stop
     test_wav_capture.py   WAV reading, real-time pacing, per-session open
-    test_vad.py           edges on the fixture vs chunk size, delays, ids, gap reset
+    test_vad.py           edges on the fixture vs chunk size and window phase, delays, ids, gap reset
+    test_speech_watch.py  daemon-wide VAD: events, speech starts by id and expiry, mic going quiet
     test_timeline.py      runs, cuts, edge snapping, jitter vs gaps, per-connection offsets
     test_pause_gate.py    held silence, pre-speech pad, short vs long pauses, flush
     test_markers.py       word-gap placement, char fallback, empty text, queue
@@ -94,6 +96,7 @@ tests/
     test_daemon_audio.py      word times through a cut, several commits, rollover and replay
     test_daemon_clients.py    hello gate, welcome, errors, busy and eviction, observers, disconnects, reload
     test_daemon_lifecycle.py  socket file, shutdown, context store, marker times
+    test_daemon_speech.py     VAD event routing, speech_id starts (edge, expiry, mic closed, eviction)
   live/                   opt-in (`pytest -m live`): real mic, real backend key
     test_elevenlabs_live.py  fixture to real EL: word times at the speech edges, padded tail, bad key
 pyproject.toml            package, deps, ruff/pyright/pytest settings

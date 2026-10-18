@@ -4,7 +4,14 @@ import numpy as np
 import pytest
 
 from stt_daemon.audio.frames import Frame, Samples
-from stt_daemon.audio.vad import SpeechEnded, SpeechStarted, StreamingVAD, VadEvent
+from stt_daemon.audio.vad import (
+    EDGE_LOOKBACK_WINDOWS,
+    WINDOW,
+    SpeechEnded,
+    SpeechStarted,
+    StreamingVAD,
+    VadEvent,
+)
 from stt_daemon.audio.wav_capture import read_wav
 
 RATE = 16000
@@ -47,10 +54,21 @@ def test_events_come_after_the_minimum_durations(speech: Samples) -> None:
         frame = Frame(speech[i : i + 512], T0 + (i + 512) / RATE, RATE)
         confirmed += [(e, frame.end) for e in vad.push(frame)]
     for event, when in confirmed:
-        delay = vad.start_delay_s if isinstance(event, SpeechStarted) else vad.end_delay_s
-        assert when - event.at == pytest.approx(delay, abs=0.001)
-    assert vad.start_delay_s == pytest.approx(0.256)
+        if isinstance(event, SpeechStarted):
+            assert 0.256 - 0.001 <= when - event.at <= vad.start_delay_s + 0.001
+        else:
+            assert when - event.at == pytest.approx(vad.end_delay_s, abs=0.001)
+    assert vad.start_delay_s == pytest.approx(0.256 + EDGE_LOOKBACK_WINDOWS * WINDOW / RATE)
     assert vad.end_delay_s == pytest.approx(0.608)
+
+
+@pytest.mark.parametrize("phase", range(0, WINDOW, 32))
+def test_starts_stay_at_the_edge_whatever_the_window_phase(speech: Samples, phase: int) -> None:
+    audio = np.concatenate([np.zeros(phase, np.float32), speech])
+    starts = [e for e in _feed(StreamingVAD(), audio, 320) if isinstance(e, SpeechStarted)]
+    assert len(starts) == 2
+    for began, (start, _) in zip(starts, SPEECH, strict=True):
+        assert began.at - T0 - phase / RATE == pytest.approx(start, abs=0.03)
 
 
 def test_speech_shorter_than_the_minimum_is_ignored(speech: Samples) -> None:

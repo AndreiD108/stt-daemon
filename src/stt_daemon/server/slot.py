@@ -12,7 +12,8 @@ from dataclasses import asdict, dataclass, field, replace
 from typing import Literal
 
 from ..audio.capture import CaptureSource
-from ..audio.frames import Attachment
+from ..audio.frames import Attachment, epoch_ms
+from ..audio.vad import SpeechStarted, VadEvent
 from ..session.events import EvictedBy, SessionEnded, SessionEvent, SessionStarted
 from ..session.session import Session, start_point
 from .peer import Peer
@@ -103,7 +104,8 @@ class Slot:
         """A takeover's new client while the holder stops."""
         self._previous_end: float | None = None
         self._announced: tuple[StateName, str | None, str | None] = ("idle", None, None)
-        self._wall_offset = time.time() - time.monotonic()
+        self._speaking = False
+        self._last_speech: float | None = None
 
     @property
     def state(self) -> SlotState:
@@ -111,6 +113,16 @@ class Slot:
         if claim is None:
             return SlotState("idle")
         return SlotState("evictable" if claim.evictable else "busy", self._holder_info(claim))
+
+    def heard(self, event: VadEvent) -> None:
+        """A daemon-wide VAD event; feeds `last_speech_at` and the evictable timer."""
+        self._speaking = isinstance(event, SpeechStarted)
+        self._last_speech = event.at
+
+    @property
+    def last_speech_at(self) -> float | None:
+        """Monotonic time speech was last heard; now while speech goes on."""
+        return time.monotonic() if self._speaking else self._last_speech
 
     def session_of(self, client_id: str) -> Session | None:
         """The client's started session, if it holds the slot."""
@@ -294,8 +306,7 @@ class Slot:
             self._announce()
 
     def _evictable_in(self, claim: _Claim) -> float:
-        assert claim.session is not None
-        last = claim.session.last_speech_at
+        last = self.last_speech_at
         quiet_since = claim.started_mono if last is None else max(last, claim.started_mono)
         return quiet_since + self._evictable_after_s - time.monotonic()
 
@@ -307,7 +318,9 @@ class Slot:
 
     def _holder_info(self, claim: _Claim) -> Holder:
         assert claim.session is not None
-        last = claim.session.last_speech_at
+        last = self.last_speech_at
+        if last is not None and last < claim.started_mono:
+            last = None
         return Holder(
             client_id=claim.client.client_id,
             pid=claim.client.peer.pid,
@@ -316,5 +329,5 @@ class Slot:
             session_label=claim.session_label,
             session_id=claim.session.session_id,
             since=claim.started_at,
-            last_speech_at=None if last is None else round((last + self._wall_offset) * 1000),
+            last_speech_at=None if last is None else epoch_ms(last),
         )

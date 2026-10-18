@@ -3,7 +3,9 @@
 sherpa-onnx's `VadModel.is_speech` is used with no minimum durations, as a per-window speech
 flag. It reports a change one window late: it needs a second window over the threshold to start,
 and a second window under it to stop. The debounce here keeps the window where each run began,
-so events carry the true edge, not the time they were confirmed.
+so events carry the true edge, not the time they were confirmed. Near the threshold, the flag can
+rise a few windows into a speech, so a second model flags windows at `EDGE_THRESHOLD`, and a start
+moves back to where that flag's run began (at most `EDGE_LOOKBACK_WINDOWS`).
 """
 
 import collections
@@ -27,6 +29,8 @@ WINDOW = 512
 """Samples per silero window at 16 kHz."""
 FLAG_LAG_WINDOWS = 1
 GAP_RESET_S = 0.5
+EDGE_THRESHOLD = 0.15
+EDGE_LOOKBACK_WINDOWS = 6
 _TINY_DURATION_S = 0.001  # sherpa rejects 0; any value under one window acts as 0
 
 
@@ -83,6 +87,7 @@ class StreamingVAD:
             raise ValueError(f"the VAD needs 16 kHz audio, got {sample_rate} Hz")
         self.sample_rate = sample_rate
         self._model = _create_model(threshold, sample_rate)
+        self._edge_model = _create_model(min(threshold, EDGE_THRESHOLD), sample_rate)
         # A run must span the lagging flag's own windows before it can be confirmed.
         min_run = (FLAG_LAG_WINDOWS + 1) * WINDOW
         self._min_speech = max(min_speech_ms * sample_rate // 1000, min_run)
@@ -96,12 +101,14 @@ class StreamingVAD:
         self._last_end: float | None = None
         self._speech_id: str | None = None
         self._run_start: int | None = None
+        self._low_run_start: int | None = None
         self._silence_start: int | None = None
 
     @property
     def start_delay_s(self) -> float:
-        """Longest time from a speech's true start to its `SpeechStarted`, frame wait aside."""
-        return math.ceil(self._min_speech / WINDOW) * WINDOW / self.sample_rate
+        """Longest time from a start's `at` to its `SpeechStarted`, frame wait aside."""
+        windows = math.ceil(self._min_speech / WINDOW) + EDGE_LOOKBACK_WINDOWS
+        return windows * WINDOW / self.sample_rate
 
     @property
     def end_delay_s(self) -> float:
@@ -128,7 +135,9 @@ class StreamingVAD:
         while buf.size - offset >= WINDOW:
             window = buf[offset : offset + WINDOW]
             offset += WINDOW
-            event = self._step(bool(self._model.is_speech(window)))
+            event = self._step(
+                bool(self._model.is_speech(window)), bool(self._edge_model.is_speech(window))
+            )
             if event is not None:
                 events.append(event)
         self._pending = buf[offset:].copy()
@@ -141,18 +150,27 @@ class StreamingVAD:
         if self._speech_id is not None and self._last_end is not None:
             events.append(SpeechEnded(self._speech_id, self._last_end))
         self._model.reset()
+        self._edge_model.reset()
         self._next_sample += self._pending.size
         self._segment_start = self._next_sample
         self._pending = np.empty(0, dtype=np.float32)
         self._anchors.clear()
         self._last_end = None
-        self._speech_id = self._run_start = self._silence_start = None
+        self._speech_id = self._run_start = self._low_run_start = self._silence_start = None
         return events
 
-    def _step(self, speech: bool) -> VadEvent | None:
+    def _step(self, speech: bool, low: bool) -> VadEvent | None:
         window_start = self._next_sample
         self._next_sample += WINDOW
         flag_edge = max(window_start - FLAG_LAG_WINDOWS * WINDOW, self._segment_start)
+        if not low or self._speech_id is not None:
+            self._low_run_start = None
+        elif self._low_run_start is None:
+            self._low_run_start = flag_edge
+        elif self._run_start is None:
+            # Only the lookback before a start can use it; older history would never be trimmed.
+            lookback_from = flag_edge - EDGE_LOOKBACK_WINDOWS * WINDOW
+            self._low_run_start = max(self._low_run_start, lookback_from)
         if self._speech_id is None:
             if not speech:
                 self._run_start = None
@@ -162,7 +180,7 @@ class StreamingVAD:
             if self._next_sample - self._run_start < self._min_speech:
                 return None
             self._speech_id = next(self._ids)
-            event = SpeechStarted(self._speech_id, self._time_of(self._run_start))
+            event = SpeechStarted(self._speech_id, self._time_of(self._start_edge(self._run_start)))
             self._run_start = self._silence_start = None
             return event
         if speech:
@@ -176,6 +194,12 @@ class StreamingVAD:
         self._speech_id = self._run_start = self._silence_start = None
         return event
 
+    def _start_edge(self, run_start: int) -> int:
+        low = self._low_run_start
+        if low is None or low >= run_start:
+            return run_start
+        return max(low, run_start - EDGE_LOOKBACK_WINDOWS * WINDOW, self._segment_start)
+
     def _time_of(self, sample: int) -> float:
         first, start = self._anchors[0]
         for anchor_first, anchor_start in self._anchors:
@@ -187,7 +211,9 @@ class StreamingVAD:
     def _trim_anchors(self) -> None:
         next_edge = self._next_sample - FLAG_LAG_WINDOWS * WINDOW
         oldest_needed = min(
-            s for s in (self._run_start, self._silence_start, next_edge) if s is not None
+            s
+            for s in (self._run_start, self._low_run_start, self._silence_start, next_edge)
+            if s is not None
         )
         while len(self._anchors) > 1 and self._anchors[1][0] <= oldest_needed:
             self._anchors.popleft()
