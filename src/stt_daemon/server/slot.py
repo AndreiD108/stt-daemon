@@ -167,6 +167,17 @@ class Slot:
         elif claim.session is not None and claim.session.state == "running":
             await claim.session.cancel("client_gone")
 
+    async def shutdown(self) -> None:
+        """Daemon exit, after pending starts are cancelled: the running session stops as
+        `stop_session` would."""
+        claim = self._holder
+        if claim is None or claim.session is None or claim.session.state == "new":
+            return
+        if claim.session.state == "running":
+            await claim.session.stop()
+        else:
+            await claim.session.wait_ended()
+
     async def _open(
         self, claim: _Claim, *, since: float | None = None, attachment: Attachment | None = None
     ) -> SessionStarted:

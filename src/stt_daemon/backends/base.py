@@ -144,6 +144,11 @@ class Backend(ABC):
     name: ClassVar[str]
     capabilities: Capabilities
 
+    @property
+    def default_language(self) -> str | None:
+        """The language from config used when a session names none; None: no such setting."""
+        return None
+
     @classmethod
     @abstractmethod
     def create(cls, config: Config, credentials: Credentials) -> Self:

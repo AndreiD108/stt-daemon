@@ -89,6 +89,10 @@ class ElevenLabsBackend(Backend):
     def __repr__(self) -> str:
         return f"ElevenLabsBackend(model_id={self._config.model_id!r})"
 
+    @property
+    def default_language(self) -> str:
+        return self._config.language
+
     @classmethod
     def create(cls, config: Config, credentials: Credentials) -> Self:
         key = credentials.get(cls.name)

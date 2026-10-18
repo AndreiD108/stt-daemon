@@ -4,7 +4,8 @@ One daemon owns the mic; many clients connect; one session runs at a time (the s
 
 ## Conventions
 
-- Transport: JSONL (one JSON object per line, UTF-8, `\n`) over a Unix socket. Socket file
+- Transport: JSONL (one JSON object per line, UTF-8, `\n`; at most 1 MiB, a longer line closes
+  the connection) over a Unix socket. Socket file
   permissions are the access control. Path: `$XDG_RUNTIME_DIR/stt-daemon/stt.sock` on Linux,
   `$TMPDIR/stt-daemon/stt.sock` on macOS; `STT_DAEMON_SOCKET` overrides it for the daemon and
   for clients.
@@ -65,8 +66,9 @@ All fields optional.
   at the command. Without it, the session's audio starts 1 s before the command arrived when the
   mic is kept open, and when the mic is ready otherwise. Either way that point is `started_at`.
 - `backend`: default `default_backend` from `welcome`.
-- `language`: a code from the backend's list, or `"auto"` (detect). Default: `"auto"` when the
-  backend lists it, else the backend's default from config.
+- `language`: a code from the backend's list, or `"auto"` (detect). Default: the backend's
+  `language` in config (`backends.elevenlabs.language`, itself `"auto"` unless changed); for a
+  backend with no such setting, `"auto"` when it lists it.
 - `keyterms`: bias words, merged after the config defaults.
 - `previous_text`: context hint for the backend (trimmed to its limit, 50 chars for EL).
 - `context_key`: when `previous_text` is missing, the daemon uses the last text stored under
@@ -100,7 +102,8 @@ Reply: `session_started`, or `error` with code `busy` (data has the `slot`), `se
 (this client already holds one), `speech_expired` (the speech start left the buffer),
 `no_backend` (none set up; the message names `stt-daemon key set elevenlabs` and
 `stt-daemon backend install parakeet`), `unknown_backend`, `unsupported_language`, `unsupported`,
-`bad_request`.
+`bad_request`, `mic_unavailable` (the mic didn't open), or the backend's code when it can't
+connect (`auth`, `quota`, `network`, …, as in `session_error`).
 
 ### `add_marker`
 
@@ -153,12 +156,15 @@ Drops what is left. Reply: `session_ended` (reason `cancelled`), or `error {code
 ```
 
 Re-reads config and credentials and rescans installed backends. Sent by the `stt-daemon` CLI after
-`key set`, `backend install` and `backend set-default`. A running session keeps its backend. Reply:
-`backends`; every other client gets the same `backends` event.
+`key set`, `backend install` and `backend set-default`. A running session keeps its backend;
+changes to `[audio]` and `[slot]` take effect when the daemon restarts. Reply: `backends`; every
+other client gets the same `backends` event. Or `error {code: "config"}` when the config or
+credentials file can't be read; the daemon keeps its last setup.
 
 ### `ping`
 
-Reply: `pong {}`.
+Reply: `pong {}`. Answered at once; other commands from one connection run one at a time, in order
+(a `stop_session` sent during a slow start waits for the start).
 
 ## Daemon → client
 
@@ -324,7 +330,11 @@ of publishing that text twice. This can delay a segment, but does not discard th
 {"code": "busy", "message": "…"}
 ```
 
-The reply to a command that failed. The message says what happened and what to do next.
+The reply to a command that failed. The message says what happened and what to do next. A field
+with the wrong type gives `bad_request` (`invalid` for `add_marker`), with `field` naming it. A line
+that isn't a JSON object with a `type` gets `bad_request` without `reply_to`; an unknown `type`
+gets `bad_request`. `internal`: the daemon failed; its log says why. A connection whose unread
+events pile up past 8 MiB is closed.
 
 ## VAD events
 

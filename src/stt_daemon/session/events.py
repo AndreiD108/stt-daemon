@@ -1,6 +1,6 @@
 """What a session reports, in the order it happens; the server turns these into protocol events."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from .transcript import Segment
@@ -46,6 +46,8 @@ class SessionEnded:
     segment_count: int
     evicted_by: EvictedBy | None = None
     """Set by the slot, with reason "evicted"."""
+    plain_text: str = field(default="", compare=False)
+    """`final_text` without markers."""
 
 
 type SessionEvent = SessionStarted | PartialText | Segment | SessionError | SessionEnded

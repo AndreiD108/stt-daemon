@@ -135,6 +135,8 @@ class FakeConnection(Connection):
         self.options = options
         self.chunks: list[Samples] = []
         self.commit_ids: list[int] = []
+        self.commit_spans: list[tuple[float, float]] = []
+        """(start_s, end_s) of the audio each commit covered, while the connection lived."""
         self.ended = False
         self._backend = backend
         self._sink = sink
@@ -177,6 +179,7 @@ class FakeConnection(Connection):
             return commit_id
         start, end = self._committed_samples, self._sent_samples
         self._committed_samples = end
+        self.commit_spans.append((start / SAMPLE_RATE, end / SAMPLE_RATE))
         reply = self._backend.take_reply() if end > start else None
         self._pending.append(
             _PendingCommit(commit_id, reply, start / SAMPLE_RATE, end / SAMPLE_RATE)

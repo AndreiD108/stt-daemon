@@ -165,16 +165,19 @@ class Session:
         self._emit(self.started)
         return self.started
 
-    def add_marker(self, marker: str, at: int | None = None) -> int:
-        """Accept a marker; `at` is epoch ms (default: now). Returns its session ms."""
+    def add_marker(
+        self, marker: str, at: int | None = None, *, arrived: float | None = None
+    ) -> int:
+        """Accept a marker; `at` is epoch ms, no later than `arrived` (monotonic, when the
+        command came; default now), which is also the default. Returns its session ms."""
         if self._state != "running" or self.started is None:
             if self._state == "new":
                 raise MarkerRefused("no_session", "the session hasn't started; wait for it")
             raise MarkerRefused(
                 "session_stopping", "the session is ending and takes no more markers"
             )
-        now_ms = self._timeline.to_ms(time.monotonic())
-        at_ms = now_ms if at is None else min(at - self.started.started_at, now_ms)
+        arrived_ms = self._timeline.to_ms(time.monotonic() if arrived is None else arrived)
+        at_ms = arrived_ms if at is None else min(at - self.started.started_at, arrived_ms)
         if at_ms < 0:
             raise MarkerRefused(
                 "out_of_range", "the marker's time is before the session's first audio"
@@ -287,6 +290,7 @@ class Session:
         text, placed = place(event.text, words, (start_ms, end_ms), markers)
         segment = self._transcript.add(
             text,
+            plain=event.text,
             language=event.language if self._options.open.language == "auto" else None,
             span=(start_ms, end_ms),
             words=words if self._options.word_timestamps else None,
@@ -357,6 +361,7 @@ class Session:
             text, placed = place("", (), (at, at), self._markers.take())
             segment = self._transcript.add(
                 text,
+                plain="",
                 language=None,
                 span=(at, at),
                 words=() if self._options.word_timestamps else None,
@@ -372,6 +377,7 @@ class Session:
             self._transcript.final_text,
             self._timeline.to_ms(self.audio_end),
             len(self._transcript.segments),
+            plain_text=self._transcript.plain_text,
         )
         self._state = "ended"
         self._ended.set_result(ended)

@@ -35,8 +35,12 @@ src/                      package source
       elevenlabs.py       Scribe v2 Realtime: retrying open, padded short commits, in-order acks, pad-free word times
       elevenlabs_wire.py  EL language codes, error message → (code, retryable)
       fake.py             FakeBackend for tests: scripted replies, partials, delays, failures, warnings, time limit
-    server/               the socket side: who holds the session slot, who is connecting
+    server/               the socket side: connections, commands, the session slot, event routing
       __init__.py         empty package marker
+      socket.py           Server: socket file, hello gate, per-connection command order, routing, reload, shutdown
+      messages.py         JSONL envelope; per-command field checks → bad_request / invalid naming the field
+      wire.py             session events → protocol event data (words, after_word only when asked)
+      backend_set.py      Setup: backends set up here, default; resolve a start (language, features, hints)
       slot.py             Slot: idle/busy/evictable, sticky evictable timer, takeover order, slot changes
       peer.py             socket peer's pid and cmdline: SO_PEERCRED + /proc; macOS LOCAL_PEERPID + KERN_PROCARGS2
     session/              one session: capture → VAD → pause cutting → backend → segments
@@ -47,8 +51,10 @@ src/                      package source
       pause_gate.py       PauseGate: sends speech and short pauses, holds long ones back to a pre-speech pad
       timeline.py         sent audio per connection ↔ capture time; backend seconds → session ms
       markers.py          pending markers; placement in word gaps or by character length
-      transcript.py       Segment, committed segments, final text
-    cli.py                `stt-daemon` entry point; only --version so far
+      transcript.py       Segment, committed segments, final text (with and without markers)
+      context.py          previous_text store by (client label, context_key), in memory
+    cli.py                `stt-daemon` entry point: run
+    daemon.py             `run`: config, credentials, mic, server; SIGTERM/SIGINT shutdown
     config.py             config.toml loading, defaults, validation; config/socket paths per OS; in-place key writer
     credentials.py        API keys: mode-600 credentials.toml, <BACKEND>_API_KEY env, stdin keys; key writer
 tests/
@@ -79,7 +85,15 @@ tests/
     test_credentials.py   mode/owner checks, precedence, writer, stdin parsing, no key in errors
     test_slot.py          slot states, sticky evictable, takeover order and failures, client_gone
     test_peer.py          peer pid/cmdline over real Unix sockets; macOS parsing on fixture bytes
+    test_messages.py      envelope parsing, encoding, per-command field checks
+    test_backend_set.py   setup and default, language default and checks, features, hints, context lookup
+    test_cli.py           run with a broken config
   integration/            real daemon over a socket, WAV capture, fake backend
+    conftest.py           `daemon` fixture
+    harness.py            in-process Server on a temp socket; test clients; fixture helpers
+    test_daemon_audio.py      word times through a cut, several commits, rollover and replay
+    test_daemon_clients.py    hello gate, welcome, errors, busy and eviction, observers, disconnects, reload
+    test_daemon_lifecycle.py  socket file, shutdown, context store, marker times
   live/                   opt-in (`pytest -m live`): real mic, real backend key
     test_elevenlabs_live.py  fixture to real EL: word times at the speech edges, padded tail, bad key
 pyproject.toml            package, deps, ruff/pyright/pytest settings
