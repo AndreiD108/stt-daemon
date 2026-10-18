@@ -143,3 +143,29 @@ never the value; tests assert this.
 The Linux wheels of `sherpa-onnx` load `libonnxruntime.so` from `sherpa-onnx-core`, but uv resolves
 `sherpa-onnx`'s deps from wheels that don't declare it. Keep both as direct deps at the same `==`
 version, and bump them together.
+
+## The pre-speech hold follows the VAD's delay
+
+The VAD confirms a speech start `StreamingVAD.start_delay_s` late (about 0.45 s at defaults, edge
+lookback included), and its `at` is the true edge. The session's `PauseGate` keeps that delay plus
+the pad (`vad.pause_keep_ms`) plus two windows of held audio, computed in `session/session.py`.
+Keep it derived: a fixed hold shorter than the delay cuts the first syllable after every pause.
+
+## Recovery drops audio only when the backend answers
+
+The recovery log (`session/recovery.py`) keeps every audio frame and commit that no connection has
+answered; a commit's answer trims it. After a reconnect the new connection gets the whole log
+first. Trimming on send instead of on answer loses audio when a connection fails.
+
+## Parakeet's `bpe.vocab` is generated and unverified
+
+sherpa-onnx's Parakeet export has no `bpe.vocab`, which hotword decoding needs.
+`backends/install.py` writes one from `tokens.txt`, score = minus the token id. This is a
+workaround checked only on TTS clips, not against the real SentencePiece scores. Tokens that
+start a word begin with a space, not `▁`.
+
+## Local commit hooks
+
+`.git/hooks/pre-commit` and `commit-msg` exist only locally, not in the repo: they reject staged
+text and commit messages with words from `.git/hooks/deny-words.sh`. Change the text; never
+bypass them.
