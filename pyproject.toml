@@ -45,7 +45,10 @@ testpaths = ["tests"]
 addopts = "-m 'not live'"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-markers = ["live: needs a real mic or a backend API key; run with -m live"]
+markers = [
+    "live: needs a real mic or a backend API key; run with -m live",
+    "slow: runs a local model; skipped when it isn't installed",
+]
 
 [dependency-groups]
 dev = [

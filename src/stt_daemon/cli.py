@@ -7,6 +7,7 @@ from pathlib import Path
 
 from stt_daemon import __version__, control
 from stt_daemon.backends import BACKENDS
+from stt_daemon.backends.install import CREDIT, InstallError, install_parakeet
 from stt_daemon.config import ConfigError, load_config, set_config_string, socket_path
 from stt_daemon.credentials import (
     CredentialsError,
@@ -37,6 +38,8 @@ def main(argv: list[str] | None = None) -> int:
                 return _service(args)
             case "key":
                 return _key_set(args.backend)
+            case "backend" if args.action == "install":
+                return _install(args.backend)
             case "backend":
                 return _set_default(args.backend)
             case "listen":
@@ -44,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
             case _:
                 _parser().print_help()
                 return 0
-    except (ConfigError, CredentialsError, ServiceError) as exc:
+    except (ConfigError, CredentialsError, ServiceError, InstallError) as exc:
         return _fail(str(exc))
 
 
@@ -89,6 +92,10 @@ def _parser() -> argparse.ArgumentParser:
     backend_actions = backend.add_subparsers(dest="action", required=True)
     default = backend_actions.add_parser("set-default", help="the backend sessions use by default")
     default.add_argument("backend", choices=list(BACKENDS))
+    install = backend_actions.add_parser(
+        "install", help="download a local backend's model and tell the daemon"
+    )
+    install.add_argument("backend", choices=["parakeet"])
 
     listen = commands.add_parser("listen", help="start a session and print what it hears")
     listen.add_argument("--backend", help="default: the daemon's default backend")
@@ -169,6 +176,14 @@ def _key_set(backend: str) -> int:
         key = sys.stdin.readline()
     path = write_key(backend, key)
     print(f"stored the {backend} key in {path}")
+    _pin_default(before, backend)
+    return _reload_daemon()
+
+
+def _install(backend: str) -> int:
+    before = _effective_default()
+    path, installed = install_parakeet()
+    print(f"{backend} {'is installed in' if installed else 'was already in'} {path} ({CREDIT})")
     _pin_default(before, backend)
     return _reload_daemon()
 

@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 
 from stt_daemon import cli, daemon
+from stt_daemon.backends.install import InstallError
+from stt_daemon.backends.parakeet import MODEL_FILES, model_dir
 from stt_daemon.cli import main
 from stt_daemon.credentials import load_credentials, write_key
 
@@ -96,6 +98,48 @@ def test_set_default_refuses_a_backend_that_is_not_set_up(
 ) -> None:
     assert main(["backend", "set-default", "elevenlabs"]) == 1
     assert "key set elevenlabs" in capsys.readouterr().err
+    assert not (home / "config.toml").exists()
+
+
+def _fake_install(monkeypatch: pytest.MonkeyPatch) -> None:
+    def install() -> tuple[Path, bool]:
+        model = model_dir()
+        model.mkdir(parents=True)
+        for name in MODEL_FILES:
+            (model / name).write_text("x")
+        return model, True
+
+    monkeypatch.setattr(cli, "install_parakeet", install)
+
+
+def test_backend_install_makes_the_first_backend_the_default(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _fake_install(monkeypatch)
+    assert main(["backend", "install", "parakeet"]) == 0
+    assert _default_backend(home) == "parakeet"
+    assert "not running" in capsys.readouterr().out
+    assert main(["backend", "set-default", "parakeet"]) == 0
+
+
+def test_backend_install_keeps_the_backend_already_in_use(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_key("elevenlabs", "sk-abc123")
+    _fake_install(monkeypatch)
+    assert main(["backend", "install", "parakeet"]) == 0
+    assert _default_backend(home) == "elevenlabs"
+
+
+def test_backend_install_failure_exits_1(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fail() -> tuple[Path, bool]:
+        raise InstallError("the download failed: connection refused")
+
+    monkeypatch.setattr(cli, "install_parakeet", fail)
+    assert main(["backend", "install", "parakeet"]) == 1
+    assert "connection refused" in capsys.readouterr().err
     assert not (home / "config.toml").exists()
 
 

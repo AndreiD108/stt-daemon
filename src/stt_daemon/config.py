@@ -68,6 +68,8 @@ class ElevenLabsConfig:
 @dataclass
 class ParakeetConfig:
     keyterms: list[str] = field(default_factory=list[str])
+    hotwords_score: float = 1.5
+    """Bias per keyterm token in beam search; too high and keyterms replace similar words."""
 
 
 @dataclass
@@ -96,6 +98,13 @@ def config_dir(env: Mapping[str, str] | None = None) -> Path:
     env = os.environ if env is None else env
     base = env.get("XDG_CONFIG_HOME", "")
     root = Path(base) if os.path.isabs(base) else Path.home() / ".config"
+    return root / "stt-daemon"
+
+
+def data_dir(env: Mapping[str, str] | None = None) -> Path:
+    env = os.environ if env is None else env
+    base = env.get("XDG_DATA_HOME", "")
+    root = Path(base) if os.path.isabs(base) else Path.home() / ".local" / "share"
     return root / "stt-daemon"
 
 
@@ -199,6 +208,8 @@ def _validate(config: Config, path: Path) -> None:
         0 <= vad.pause_keep_ms <= vad.min_silence_ms, "vad.pause_keep_ms", "0 to vad.min_silence_ms"
     )
     check(config.session.stop_wait_ms > 0, "session.stop_wait_ms", "positive")
+    score = config.backends.parakeet.hotwords_score
+    check(0 < score <= 10, "backends.parakeet.hotwords_score", "above 0, at most 10")
     check(config.slot.evictable_after_s > 0, "slot.evictable_after_s", "positive")
     level = config.logging.level.upper()
     check(level in LOG_LEVELS, "logging.level", f"one of {', '.join(LOG_LEVELS)}")

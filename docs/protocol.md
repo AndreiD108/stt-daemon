@@ -287,8 +287,8 @@ previous one; a `segment` replaces the partial. Only with `partials: true`.
 - `words`, and `after_word` on each marker: only with `word_timestamps: true`. `after_word` is
   the index in `words` of the word the marker follows, `-1` before the first.
 - When segments commit is up to the backend. EL: 25 s of wall time after the last commit, once
-  speech was sent (EL advises 20–30 s), and at stop. A backend that transcribes after the fact
-  (local Whisper, OpenRouter) may commit at pauses or only at stop.
+  speech was sent (EL advises 20–30 s), and at stop. Parakeet, which transcribes after the fact:
+  at each pause the VAD reports, at stop, and 30 s after the last commit when no pause came.
 
 ### `session_ended`
 

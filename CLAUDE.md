@@ -35,6 +35,8 @@ src/                      package source
       elevenlabs.py       Scribe v2 Realtime: retrying open, padded short commits, in-order acks, pad-free word times
       elevenlabs_wire.py  EL language codes, error message → (code, retryable)
       fake.py             FakeBackend for tests: scripted replies, partials, delays, failures, warnings, time limit
+      parakeet.py         local Parakeet TDT on sherpa-onnx: one cached recognizer, decode per commit, token → word times
+      install.py          `backend install parakeet`: download, SHA-256 check, unpack, bpe.vocab from tokens.txt
     server/               the socket side: connections, commands, the session slot, event routing
       __init__.py         empty package marker
       socket.py           Server: socket file, hello gate, per-connection command order, routing, reload, shutdown
@@ -60,16 +62,17 @@ src/                      package source
       systemd.py          unit and limits.conf rendering, ExecStart escaping; install/remove/status/logs
       launchd.py          macOS agent plist (TMPDIR kept for the socket); launchctl calls; untested on a Mac
       preflight.py        PortAudio load check; install command per distro from /etc/os-release
-    cli.py                `stt-daemon` entry point: run, service, key set, backend set-default, listen
+    cli.py                `stt-daemon` entry point: run, service, key set, backend set-default/install, listen
     control.py            one blocking request to the running daemon (hello, command, reply); `reload` after key set
     listen.py             `listen`: session client printing events; terminal keys (Enter, marker key, Ctrl-C)
     daemon.py             `run`: config, credentials, mic, server; SIGTERM/SIGINT shutdown
     config.py             config.toml loading, defaults, validation; config/socket paths per OS; in-place key writer
     credentials.py        API keys: mode-600 credentials.toml, <BACKEND>_API_KEY env, stdin keys; key writer
 tests/
-  conftest.py             marks everything under tests/live as `live` (skipped by default)
+  conftest.py             marks tests/live as `live` (skipped by default); a temp XDG_DATA_HOME per test
   fixtures/
     two_phrases.wav       TTS speech, 16 kHz: phrases at 1.00–3.74 s and 5.74–7.81 s
+    jargon.wav            TTS speech, 16 kHz: three phrases with jargon words, 2 s pauses
   unit/                   pure logic; local sockets only, never the mic or the internet
     conftest.py           fixtures: local fake ElevenLabs server, backend pointed at it
     fake_elevenlabs.py    that server: records requests and messages, scripted commit replies
@@ -97,7 +100,9 @@ tests/
     test_peer.py          peer pid/cmdline over real Unix sockets; macOS parsing on fixture bytes
     test_messages.py      envelope parsing, encoding, per-command field checks
     test_backend_set.py   setup and default, language default and checks, features, hints, context lookup
-    test_cli.py           run (broken config, --keys-stdin), key set default rule, set-default, service install files
+    test_cli.py           run (broken config, --keys-stdin), key set and backend install default rule, set-default, service files
+    test_parakeet.py      token → word grouping, hotwords, per-commit decoding, failures, recognizer swap, model check
+    test_install.py       bpe.vocab, unpack once, partial model replaced, bad download / archive leaves nothing
     test_service.py       unit/plist rendering, ExecStart escaping, systemctl calls, remove guard, PortAudio hints
   integration/            real daemon over a socket, WAV capture, fake backend
     conftest.py           `daemon` fixture
@@ -107,6 +112,7 @@ tests/
     test_daemon_lifecycle.py  socket file, shutdown, context store, marker times
     test_daemon_speech.py     VAD event routing, speech_id starts (edge, expiry, mic closed, eviction)
     test_cli_daemon.py        key set reloads the daemon; listen prints segments, exit codes
+    test_parakeet_daemon.py   `slow`, real model: commits at pauses, word times at speech edges, beam with keyterms
   live/                   opt-in (`pytest -m live`): real mic, real backend key
     test_elevenlabs_live.py  fixture to real EL: word times at the speech edges, padded tail, bad key
 pyproject.toml            package, deps, ruff/pyright/pytest settings
