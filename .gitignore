@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+*.onnx
+!src/stt_daemon/audio/silero_vad.onnx
+models/
