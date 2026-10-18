@@ -1,8 +1,8 @@
 """One session: capture → VAD → pause gate → backend → segments, until stop, cancel or failure.
 
 Everything runs on the event loop. One task reads the capture attachment; another commits on the
-backend's cadence. Sends and commits share a lock so a commit covers exactly the audio sent before
-it. Backend events arrive through `_on_backend_event`.
+backend's cadence. Audio and commits go to a `Link`, which sends them in order and survives the
+backend's connections ending.
 """
 
 import asyncio
@@ -16,23 +16,14 @@ from typing import Literal
 import numpy as np
 
 from ..audio.capture import CaptureSource
-from ..audio.frames import Attachment, Frame, Samples
+from ..audio.frames import Attachment, Frame
 from ..audio.vad import WINDOW, SpeechEnded, StreamingVAD
-from ..backends.base import (
-    Backend,
-    BackendEvent,
-    Closed,
-    CommitPolicy,
-    Committed,
-    Connection,
-    Failed,
-    OpenOptions,
-    Partial,
-)
+from ..backends.base import Backend, CommitPolicy, Committed, OpenOptions
 from ..config import Config
 from .events import EndReason, PartialText, SessionEnded, SessionError, SessionEvent, SessionStarted
 from .markers import MarkerQueue, TimedWord, place
 from .pause_gate import Outgoing, PauseGate
+from .recovery import Link
 from .timeline import Timeline
 from .transcript import Transcript
 
@@ -95,21 +86,11 @@ class Session:
         self._gate = PauseGate(
             hold_s=self._vad.start_delay_s + pad_s + 2 * WINDOW / rate, pad_s=pad_s
         )
-        self._chunk_samples = rate * config.audio.chunk_ms // 1000
         self._markers = MarkerQueue()
         self._transcript = Transcript()
         self._timeline = Timeline(0.0, rate)
+        self._link: Link | None = None
         self._attachment: Attachment | None = None
-        self._conn: Connection | None = None
-        self._connection_id = 0
-        self._send_lock = asyncio.Lock()
-        self._outgoing: list[Samples] = []
-        self._outgoing_samples = 0
-        self._issued = 0
-        self._answered = 0
-        self._closed = False
-        self._final_commit_id: int | None = None
-        self._progress = asyncio.Event()
         self._boundary_s: dict[int, float] = {}
         self._speech_since_commit = False
         self._last_commit_at = 0.0
@@ -150,11 +131,18 @@ class Session:
         origin = attachment.started_at
         self._timeline = Timeline(origin, self._capture.sample_rate)
         self.audio_end = origin
+        self._link = Link(
+            backend=self._backend,
+            options=self._options.open,
+            timeline=self._timeline,
+            chunk_samples=self._capture.sample_rate * self._config.audio.chunk_ms // 1000,
+            on_committed=self._on_committed,
+            on_partial=self._on_partial,
+            on_error=self._on_error,
+            on_fatal=self._on_fatal,
+        )
         try:
-            self._connection_id = 1
-            self._conn = await self._backend.open(
-                self._options.open, self._connection_id, self._on_backend_event
-            )
+            await self._link.open()
         except BaseException:
             attachment.detach()
             await self._capture.release()
@@ -239,18 +227,14 @@ class Session:
         events = self._vad.push(frame)
         for event in events:
             self._last_speech_at = event.at
-        out = self._gate.push(frame, events)
-        if out:
-            async with self._send_lock:
-                for part in out:
-                    self._queue(part)
-                if self._outgoing_samples >= self._chunk_samples:
-                    await self._flush()
+        for part in self._gate.push(frame, events):
+            self._queue(part)
         policy = self._backend.capabilities.commit_policy
-        if policy.at_pauses and any(isinstance(e, SpeechEnded) for e in events):
-            async with self._send_lock:
-                if self._speech_since_commit:
-                    await self._commit()
+        paused = any(isinstance(e, SpeechEnded) for e in events)
+        if policy.at_pauses and paused and self._speech_since_commit:
+            self._commit()
+        assert self._link is not None
+        self._link.tick(speaking=self._vad.speech_id is not None)
 
     async def _commit_loop(self, policy: CommitPolicy) -> None:
         assert policy.interval_s is not None
@@ -258,65 +242,38 @@ class Session:
             await asyncio.sleep(policy.check_every_s or policy.interval_s)
             due = time.monotonic() - self._last_commit_at >= policy.interval_s
             if due and self._speech_since_commit:
-                async with self._send_lock:
-                    await self._commit()
+                self._commit()
 
     def _queue(self, out: Outgoing) -> None:
-        samples = out.frame.samples
-        self._timeline.sent(self._connection_id, out.frame.start, samples.size, cut=out.cut)
-        self._outgoing.append(samples)
-        self._outgoing_samples += samples.size
+        assert self._link is not None
+        self._link.queue(out)
         if self._gate.speaking:
             self._speech_since_commit = True
 
-    async def _flush(self) -> None:
-        if not self._outgoing:
-            return
-        samples = np.concatenate(self._outgoing)
-        self._outgoing.clear()
-        self._outgoing_samples = 0
-        assert self._conn is not None
-        await self._conn.send_audio(samples)
-
-    async def _commit(self) -> None:
-        """Commit everything sent so far; call with the send lock held."""
-        await self._flush()
-        assert self._conn is not None
-        self._issued = await self._conn.commit()
+    def _commit(self, *, final: bool = False) -> None:
+        assert self._link is not None
+        self._link.commit(final=final)
         self._speech_since_commit = False
         self._last_commit_at = time.monotonic()
 
-    async def _wait_settled(self) -> None:
-        while not self._closed and self._answered < self._issued:
-            self._progress.clear()
-            await self._progress.wait()
+    def _on_partial(self, text: str) -> None:
+        if self._options.open.partials and self._state in ("running", "stopping"):
+            self._emit(PartialText(text))
 
-    def _on_backend_event(self, event: BackendEvent) -> None:
-        if self._state == "ended" or event.connection_id != self._connection_id:
-            return
-        match event:
-            case Partial():
-                if self._options.open.partials and self._state in ("running", "stopping"):
-                    self._emit(PartialText(event.text))
-            case Committed():
-                if self._state != "ending":  # cancelled or failed: uncommitted text is dropped
-                    self._on_committed(event)
-            case Failed() if event.fatal:
-                self._connection_lost(event)
-            case Failed():
-                self._emit(SessionError(event.code, event.message, fatal=False))
-            case Closed():
-                self._closed = True
-                self._progress.set()
+    def _on_error(self, code: str, message: str) -> None:
+        if self._state in ("running", "stopping"):
+            self._emit(SessionError(code, message, fatal=False))
 
-    def _connection_lost(self, failure: Failed) -> None:
-        """The backend connection ended on its own. Recovery (reconnect, replay) hooks in here."""
+    def _on_fatal(self, code: str, message: str) -> None:
+        """The link gave up: the backend failed for good, or reconnecting didn't work."""
         if self._state == "running":
-            self._fail(failure.code, failure.message)
+            self._fail(code, message)
         elif self._state == "stopping" and self._stop_failure is None:
-            self._stop_failure = SessionError(failure.code, failure.message, fatal=True)
+            self._stop_failure = SessionError(code, message, fatal=True)
 
-    def _on_committed(self, event: Committed) -> None:
+    def _on_committed(self, event: Committed, final: bool) -> None:
+        if self._state not in ("running", "stopping"):
+            return  # cancelled or failed: uncommitted text is dropped
         tl, conn = self._timeline, event.connection_id
         boundary = self._boundary_s.get(conn, 0.0)
         end_s = max(event.audio_end_s, boundary)
@@ -326,12 +283,8 @@ class Session:
         words: tuple[TimedWord, ...] | None = None
         if event.words is not None:
             words = tuple(self._timed(conn, w.text, w.start_s, w.end_s) for w in event.words)
-        final = event.commit_id is not None and event.commit_id == self._final_commit_id
         markers = self._markers.take(None if final else end_ms)
         text, placed = place(event.text, words, (start_ms, end_ms), markers)
-        if event.commit_id is not None:
-            self._answered = max(self._answered, event.commit_id)
-            self._progress.set()
         segment = self._transcript.add(
             text,
             language=event.language if self._options.open.language == "auto" else None,
@@ -360,12 +313,11 @@ class Session:
         try:
             async with asyncio.timeout(self._config.session.stop_wait_ms / 1000):
                 await self._stop_intake(drain=True)
-                async with self._send_lock:
-                    for out in self._gate.flush():
-                        self._queue(out)
-                    self._final_commit_id = self._issued + 1
-                    await self._commit()
-                await self._wait_settled()
+                for out in self._gate.flush():
+                    self._queue(out)
+                self._commit(final=True)
+                assert self._link is not None
+                await self._link.settle()
         except TimeoutError:
             log.warning("session %s: stopped before the backend's last text came", self.session_id)
             await self._stop_intake(drain=False)
@@ -394,18 +346,12 @@ class Session:
         elif self._audio_task is not asyncio.current_task():
             self._audio_task.cancel()
         await asyncio.wait([self._audio_task])
-        if self._commit_task is None:
-            return
-        if drain:
-            # Under the lock, so a commit in progress completes and the next commit id is known.
-            async with self._send_lock:
-                self._commit_task.cancel()
-        else:
+        if self._commit_task is not None:
             self._commit_task.cancel()
 
     async def _finish(self, reason: EndReason, error: SessionError | None = None) -> None:
-        if self._conn is not None:
-            await self._conn.close()
+        if self._link is not None:
+            await self._link.close()
         if self._markers:
             at = self._timeline.to_ms(self.audio_end)
             text, placed = place("", (), (at, at), self._markers.take())

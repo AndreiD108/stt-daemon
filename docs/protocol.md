@@ -306,7 +306,14 @@ previous one; a `segment` replaces the partial. Only with `partials: true`.
 ```
 
 A backend or capture failure during a session. `fatal: true` is followed by `session_ended`
-(reason `error`).
+(reason `error`) with every segment committed so far. `fatal: false`: the session goes on; for a
+lost backend connection, the daemon reconnects and replays audio not covered by an acknowledgement.
+It gives up, fatally, after 3 reconnects in a row without an acknowledged commit, or at once when
+the failure cannot be retried (`auth`, `quota`). Stop and eviction still use their bounded wait.
+
+When a provider returns text without saying where it cut the audio, the daemon holds that text
+until the next known commit boundary. If the connection fails first, it replays the audio instead
+of publishing that text twice. This can delay a segment, but does not discard the audio.
 
 ### `error`
 

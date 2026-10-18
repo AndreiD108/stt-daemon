@@ -34,10 +34,11 @@ src/                      package source
       base.py             the contract: Backend, Connection, events, Capabilities; keyterm merge, previous_text trim
       elevenlabs.py       Scribe v2 Realtime: retrying open, padded short commits, in-order acks, pad-free word times
       elevenlabs_wire.py  EL language codes, error message → (code, retryable)
-      fake.py             FakeBackend for tests: scripted replies, partials, delays, failures, time limit
+      fake.py             FakeBackend for tests: scripted replies, partials, delays, failures, warnings, time limit
     session/              one session: capture → VAD → pause cutting → backend → segments
       __init__.py         empty package marker
       session.py          Session: start, audio loop, commit cadence, stop (bounded) / cancel / error end
+      recovery.py         Link: unanswered-audio log, in-order sends, rollover, reconnect, paced replay
       events.py           what a session emits: started, partial, error, ended (segments from transcript)
       pause_gate.py       PauseGate: sends speech and short pauses, holds long ones back to a pre-speech pad
       timeline.py         sent audio per connection ↔ capture time; backend seconds → session ms
@@ -67,6 +68,9 @@ tests/
     test_transcript.py    final-text joining, empty segments
     test_session_audio.py   fixture sessions: word times through a cut, several commits, stop/cancel
     test_session_lifecycle.py  silent sessions: leftover markers, marker refusals, failure, failed open
+    test_recovery.py      link alone: replay tail and pacing, retries, give-up, idle drop, hung send, rollover
+    test_recovery_edges.py  close-time ack, unknown provider cuts, final-ack failure, in-flight commit/stop
+    test_session_recovery.py  fixture sessions: word times, markers, give-up, bounded stop during recovery
     test_config.py        paths per OS, defaults, type errors, config writer
     test_credentials.py   mode/owner checks, precedence, writer, stdin parsing, no key in errors
   integration/            real daemon over a socket, WAV capture, fake backend

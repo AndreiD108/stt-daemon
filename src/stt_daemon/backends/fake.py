@@ -54,6 +54,8 @@ class FakeReply:
     """Sent one per `send_audio` call while this reply is the next one, with partials on."""
     fail: tuple[str, bool] | None = None
     """(code, retryable): the connection fails instead of answering."""
+    then_fail: tuple[str, bool] | None = None
+    """(code, retryable): the connection fails right after answering."""
 
 
 class FakeBackend(Backend):
@@ -66,6 +68,8 @@ class FakeBackend(Backend):
         capabilities: Capabilities = FAKE_CAPABILITIES,
         open_failures: Iterable[OpenFailed] = (),
         open_delay_s: float = 0.0,
+        send_delay_s: float = 0.0,
+        answer_on_close: bool = False,
     ) -> None:
         self.capabilities = capabilities
         self.replies: collections.deque[FakeReply] = collections.deque(
@@ -74,6 +78,10 @@ class FakeBackend(Backend):
         self.open_failures = collections.deque(open_failures)
         """Raised by successive `open` calls before any succeeds."""
         self.open_delay_s = open_delay_s
+        self.send_delay_s = send_delay_s
+        """Each `send_audio` waits this long before taking the audio."""
+        self.answer_on_close = answer_on_close
+        """`close()` first answers waiting commits, delays skipped, as a closing server may."""
         self.open_calls = 0
         self.connections: list[FakeConnection] = []
         self._partial_index = 0
@@ -132,7 +140,8 @@ class FakeConnection(Connection):
         self._sink = sink
         self._sent_samples = 0
         self._committed_samples = 0
-        self._pending: asyncio.Queue[_PendingCommit] = asyncio.Queue()
+        self._pending: collections.deque[_PendingCommit] = collections.deque()
+        self._has_pending = asyncio.Event()
         self._worker = asyncio.create_task(self._answer_commits())
         limit = backend.capabilities.max_connection_s
         self._limit_timer = (
@@ -152,6 +161,8 @@ class FakeConnection(Connection):
         return self._sent_samples / SAMPLE_RATE
 
     async def send_audio(self, samples: Samples) -> None:
+        if self._backend.send_delay_s:
+            await asyncio.sleep(self._backend.send_delay_s)
         if self.ended:
             return
         self.chunks.append(samples.copy())
@@ -167,36 +178,57 @@ class FakeConnection(Connection):
         start, end = self._committed_samples, self._sent_samples
         self._committed_samples = end
         reply = self._backend.take_reply() if end > start else None
-        self._pending.put_nowait(
+        self._pending.append(
             _PendingCommit(commit_id, reply, start / SAMPLE_RATE, end / SAMPLE_RATE)
         )
+        self._has_pending.set()
         return commit_id
 
     async def close(self) -> None:
+        if self._backend.answer_on_close and not self.ended:
+            while self._pending:
+                pending = self._pending.popleft()
+                reply = pending.reply or FakeReply()
+                if reply.fail is None:
+                    self._answer(pending, reply)
         self._end(None)
 
     def fail(self, code: str, retryable: bool, message: str = "fake failure") -> None:
         self._end(Failed(self.connection_id, code, message, retryable))
 
+    def warn(self, code: str, message: str = "fake warning") -> None:
+        """A problem the connection lives through."""
+        self._sink(Failed(self.connection_id, code, message, retryable=True, fatal=False))
+
     async def _answer_commits(self) -> None:
         while True:
-            pending = await self._pending.get()
+            while not self._pending:
+                self._has_pending.clear()
+                await self._has_pending.wait()
+            pending = self._pending[0]
             reply = pending.reply or FakeReply()
             if reply.delay_s:
                 await asyncio.sleep(reply.delay_s)
+            self._pending.popleft()
             if reply.fail is not None:
                 self.fail(*reply.fail)
                 return
-            self._sink(
-                Committed(
-                    self.connection_id,
-                    pending.commit_id,
-                    reply.text,
-                    reply.language,
-                    _words(reply, pending.start_s, pending.end_s),
-                    pending.end_s,
-                )
+            self._answer(pending, reply)
+            if reply.then_fail is not None:
+                self.fail(*reply.then_fail)
+                return
+
+    def _answer(self, pending: _PendingCommit, reply: FakeReply) -> None:
+        self._sink(
+            Committed(
+                self.connection_id,
+                pending.commit_id,
+                reply.text,
+                reply.language,
+                _words(reply, pending.start_s, pending.end_s),
+                pending.end_s,
             )
+        )
 
     def _end(self, failure: Failed | None) -> None:
         if self.ended:

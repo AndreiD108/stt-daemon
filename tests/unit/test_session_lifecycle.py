@@ -117,7 +117,7 @@ async def test_text_answered_after_cancel_is_dropped() -> None:
         cancelling = asyncio.create_task(session.cancel())
         await asyncio.sleep(0)
         late = Committed(1, 1, "late", None, (), 0.5)
-        session._on_backend_event(late)  # pyright: ignore[reportPrivateUsage]
+        session._on_committed(late, False)  # pyright: ignore[reportPrivateUsage]
         ended = await cancelling
     finally:
         await capture.stop()
