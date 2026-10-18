@@ -225,6 +225,9 @@ Sent to every client when the slot changes state or holder.
 - `pid` and `cmdline` come from the socket peer, not from the client: on Linux `SO_PEERCRED` and
   `/proc/<pid>/cmdline`; on macOS `LOCAL_PEERPID` and the process table. `null` when the platform
   can't tell.
+- `since`: the session's `started_at`. A `busy` error that comes while the holder's session is
+  still starting has `since: null`; `slot` events come only once it has started.
+- `last_speech_at`: as of this event; the slot doesn't send an event for each speech.
 
 ### `session_started`
 

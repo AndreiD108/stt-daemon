@@ -32,11 +32,20 @@ class SessionError:
 
 
 @dataclass(frozen=True)
+class EvictedBy:
+    client_id: str
+    pid: int | None
+    client_label: str | None
+
+
+@dataclass(frozen=True)
 class SessionEnded:
     reason: EndReason
     final_text: str
     duration_ms: int
     segment_count: int
+    evicted_by: EvictedBy | None = None
+    """Set by the slot, with reason "evicted"."""
 
 
 type SessionEvent = SessionStarted | PartialText | Segment | SessionError | SessionEnded

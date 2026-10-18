@@ -35,11 +35,15 @@ src/                      package source
       elevenlabs.py       Scribe v2 Realtime: retrying open, padded short commits, in-order acks, pad-free word times
       elevenlabs_wire.py  EL language codes, error message → (code, retryable)
       fake.py             FakeBackend for tests: scripted replies, partials, delays, failures, warnings, time limit
+    server/               the socket side: who holds the session slot, who is connecting
+      __init__.py         empty package marker
+      slot.py             Slot: idle/busy/evictable, sticky evictable timer, takeover order, slot changes
+      peer.py             socket peer's pid and cmdline: SO_PEERCRED + /proc; macOS LOCAL_PEERPID + KERN_PROCARGS2
     session/              one session: capture → VAD → pause cutting → backend → segments
       __init__.py         empty package marker
       session.py          Session: start, audio loop, commit cadence, stop (bounded) / cancel / error end
       recovery.py         Link: unanswered-audio log, in-order sends, rollover, reconnect, paced replay
-      events.py           what a session emits: started, partial, error, ended (segments from transcript)
+      events.py           what a session emits: started, partial, error, ended (+ evicted_by); segments from transcript
       pause_gate.py       PauseGate: sends speech and short pauses, holds long ones back to a pre-speech pad
       timeline.py         sent audio per connection ↔ capture time; backend seconds → session ms
       markers.py          pending markers; placement in word gaps or by character length
@@ -73,6 +77,8 @@ tests/
     test_session_recovery.py  fixture sessions: word times, markers, give-up, bounded stop during recovery
     test_config.py        paths per OS, defaults, type errors, config writer
     test_credentials.py   mode/owner checks, precedence, writer, stdin parsing, no key in errors
+    test_slot.py          slot states, sticky evictable, takeover order and failures, client_gone
+    test_peer.py          peer pid/cmdline over real Unix sockets; macOS parsing on fixture bytes
   integration/            real daemon over a socket, WAV capture, fake backend
   live/                   opt-in (`pytest -m live`): real mic, real backend key
     test_elevenlabs_live.py  fixture to real EL: word times at the speech edges, padded tail, bad key
