@@ -21,12 +21,26 @@ docs/                     agent- and client-facing docs
 src/                      package source
   stt_daemon/             the `stt-daemon` package
     __init__.py           __version__ from package metadata
+    audio/                mic capture, recent-audio ring, VAD
+      __init__.py         empty package marker
+      frames.py           Frame, ring + attachments (FrameHub); one lock so attach sees each frame once
+      capture.py          CaptureSource base (keep-open vs per-session holds), MicCapture: PortAudio, watchdog
+      wav_capture.py      WavCapture: WAV files in real time, silence between; mic stand-in for tests
+      vad.py              StreamingVAD: sherpa-onnx silero per window, own debounce, true edge times
+      silero_vad.onnx     bundled silero VAD model (from sherpa-onnx releases)
+      silero_vad.LICENSE  its MIT license
     cli.py                `stt-daemon` entry point; only --version so far
     config.py             config.toml loading, defaults, validation; config/socket paths per OS; in-place key writer
     credentials.py        API keys: mode-600 credentials.toml, <BACKEND>_API_KEY env, stdin keys; key writer
 tests/
   conftest.py             marks everything under tests/live as `live` (skipped by default)
+  fixtures/
+    two_phrases.wav       TTS speech, 16 kHz: phrases at 1.00–3.74 s and 5.74–7.81 s
   unit/                   pure logic, no mic, no network
+    test_frames.py        ring order, since-trimming, eviction, multi-attach, attach atomicity
+    test_capture.py       device choice, holds, callback, stall/status recovery, backoff, hung stop
+    test_wav_capture.py   WAV reading, real-time pacing, per-session open
+    test_vad.py           edges on the fixture vs chunk size, delays, ids, gap reset
     test_config.py        paths per OS, defaults, type errors, config writer
     test_credentials.py   mode/owner checks, precedence, writer, stdin parsing, no key in errors
   integration/            real daemon over a socket, WAV capture, fake backend
