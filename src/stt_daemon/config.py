@@ -47,6 +47,12 @@ class VadConfig:
 
 
 @dataclass
+class SessionConfig:
+    stop_wait_ms: int = 5000
+    """How long a stop waits for the backend's last text before ending without it."""
+
+
+@dataclass
 class SlotConfig:
     evictable_after_s: int = 300
 
@@ -80,6 +86,7 @@ class LoggingConfig:
 class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     vad: VadConfig = field(default_factory=VadConfig)
+    session: SessionConfig = field(default_factory=SessionConfig)
     slot: SlotConfig = field(default_factory=SlotConfig)
     backends: BackendsConfig = field(default_factory=BackendsConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
@@ -191,6 +198,7 @@ def _validate(config: Config, path: Path) -> None:
     check(
         0 <= vad.pause_keep_ms <= vad.min_silence_ms, "vad.pause_keep_ms", "0 to vad.min_silence_ms"
     )
+    check(config.session.stop_wait_ms > 0, "session.stop_wait_ms", "positive")
     check(config.slot.evictable_after_s > 0, "slot.evictable_after_s", "positive")
     level = config.logging.level.upper()
     check(level in LOG_LEVELS, "logging.level", f"one of {', '.join(LOG_LEVELS)}")

@@ -116,8 +116,9 @@ Reply: `session_started`, or `error` with code `busy` (data has the `slot`), `se
 
 Placement. No early commit; every accepted marker shows up in exactly one segment:
 
-- It goes into the first segment not yet committed when the marker arrives; committed text never
-  changes.
+- It goes into the first segment not yet committed when the marker arrives whose audio reaches
+  `at`; committed text never changes. (A commit can be on its way when the marker arrives; a
+  marker from after that commit's cut waits for the next segment.)
 - Inside that segment it goes into the gap between words nearest `at`: from word times when the
   backend has them, else from character lengths across the segment's span. When `at` is before the
   segment's first word (a marker that arrived late, or in a pause), it goes first (`after_word: -1`);

@@ -35,6 +35,14 @@ src/                      package source
       elevenlabs.py       Scribe v2 Realtime: retrying open, padded short commits, in-order acks, pad-free word times
       elevenlabs_wire.py  EL language codes, error message → (code, retryable)
       fake.py             FakeBackend for tests: scripted replies, partials, delays, failures, time limit
+    session/              one session: capture → VAD → pause cutting → backend → segments
+      __init__.py         empty package marker
+      session.py          Session: start, audio loop, commit cadence, stop (bounded) / cancel / error end
+      events.py           what a session emits: started, partial, error, ended (segments from transcript)
+      pause_gate.py       PauseGate: sends speech and short pauses, holds long ones back to a pre-speech pad
+      timeline.py         sent audio per connection ↔ capture time; backend seconds → session ms
+      markers.py          pending markers; placement in word gaps or by character length
+      transcript.py       Segment, committed segments, final text
     cli.py                `stt-daemon` entry point; only --version so far
     config.py             config.toml loading, defaults, validation; config/socket paths per OS; in-place key writer
     credentials.py        API keys: mode-600 credentials.toml, <BACKEND>_API_KEY env, stdin keys; key writer
@@ -53,6 +61,12 @@ tests/
     test_capture.py       device choice, holds, callback, stall/status recovery, backoff, hung stop
     test_wav_capture.py   WAV reading, real-time pacing, per-session open
     test_vad.py           edges on the fixture vs chunk size, delays, ids, gap reset
+    test_timeline.py      runs, cuts, edge snapping, jitter vs gaps, per-connection offsets
+    test_pause_gate.py    held silence, pre-speech pad, short vs long pauses, flush
+    test_markers.py       word-gap placement, char fallback, empty text, queue
+    test_transcript.py    final-text joining, empty segments
+    test_session_audio.py   fixture sessions: word times through a cut, several commits, stop/cancel
+    test_session_lifecycle.py  silent sessions: leftover markers, marker refusals, failure, failed open
     test_config.py        paths per OS, defaults, type errors, config writer
     test_credentials.py   mode/owner checks, precedence, writer, stdin parsing, no key in errors
   integration/            real daemon over a socket, WAV capture, fake backend
