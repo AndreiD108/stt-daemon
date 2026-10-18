@@ -29,6 +29,12 @@ src/                      package source
       vad.py              StreamingVAD: sherpa-onnx silero per window, own debounce, true edge times
       silero_vad.onnx     bundled silero VAD model (from sherpa-onnx releases)
       silero_vad.LICENSE  its MIT license
+    backends/             transcription backends behind one interface; BACKENDS registry in __init__
+      __init__.py         BACKENDS: name → backend class
+      base.py             the contract: Backend, Connection, events, Capabilities; keyterm merge, previous_text trim
+      elevenlabs.py       Scribe v2 Realtime: retrying open, padded short commits, in-order acks, pad-free word times
+      elevenlabs_wire.py  EL language codes, error message → (code, retryable)
+      fake.py             FakeBackend for tests: scripted replies, partials, delays, failures, time limit
     cli.py                `stt-daemon` entry point; only --version so far
     config.py             config.toml loading, defaults, validation; config/socket paths per OS; in-place key writer
     credentials.py        API keys: mode-600 credentials.toml, <BACKEND>_API_KEY env, stdin keys; key writer
@@ -36,7 +42,13 @@ tests/
   conftest.py             marks everything under tests/live as `live` (skipped by default)
   fixtures/
     two_phrases.wav       TTS speech, 16 kHz: phrases at 1.00–3.74 s and 5.74–7.81 s
-  unit/                   pure logic, no mic, no network
+  unit/                   pure logic; local sockets only, never the mic or the internet
+    conftest.py           fixtures: local fake ElevenLabs server, backend pointed at it
+    fake_elevenlabs.py    that server: records requests and messages, scripted commit replies
+    test_backend_base.py  keyterm merge, previous_text trim
+    test_fake_backend.py  reply order, empty commits, delays, partials, failures, time limit
+    test_elevenlabs_open.py    open retries and budget, HTTP and message refusals, key kept out of logs
+    test_elevenlabs_stream.py  URL params, chunking, commits, padding, acks, partials, errors, self-commit
     test_frames.py        ring order, since-trimming, eviction, multi-attach, attach atomicity
     test_capture.py       device choice, holds, callback, stall/status recovery, backoff, hung stop
     test_wav_capture.py   WAV reading, real-time pacing, per-session open
@@ -45,6 +57,7 @@ tests/
     test_credentials.py   mode/owner checks, precedence, writer, stdin parsing, no key in errors
   integration/            real daemon over a socket, WAV capture, fake backend
   live/                   opt-in (`pytest -m live`): real mic, real backend key
+    test_elevenlabs_live.py  fixture to real EL: word times at the speech edges, padded tail, bad key
 pyproject.toml            package, deps, ruff/pyright/pytest settings
 ```
 <!-- END FILE TREE -->
