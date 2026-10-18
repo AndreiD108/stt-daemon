@@ -142,6 +142,8 @@ class Connection(ABC):
 
 class Backend(ABC):
     name: ClassVar[str]
+    takes_key: ClassVar[bool] = False
+    """Set up with `stt-daemon key set <name>`."""
     capabilities: Capabilities
 
     @property

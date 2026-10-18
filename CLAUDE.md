@@ -24,7 +24,7 @@ src/                      package source
     audio/                mic capture, recent-audio ring, VAD
       __init__.py         empty package marker
       frames.py           Frame, ring + attachments (FrameHub); one lock so attach sees each frame once
-      capture.py          CaptureSource base (keep-open vs per-session holds), MicCapture: PortAudio, watchdog
+      capture.py          CaptureSource base (keep-open vs per-session holds), MicCapture: PortAudio (loaded on first use), watchdog
       wav_capture.py      WavCapture: WAV files in real time, silence between; mic stand-in for tests
       vad.py              StreamingVAD: sherpa-onnx silero per window, own debounce, low-threshold edge lookback
       silero_vad.onnx     bundled silero VAD model (from sherpa-onnx releases)
@@ -54,7 +54,15 @@ src/                      package source
       markers.py          pending markers; placement in word gaps or by character length
       transcript.py       Segment, committed segments, final text (with and without markers)
       context.py          previous_text store by (client label, context_key), in memory
-    cli.py                `stt-daemon` entry point: run
+    service/              user service install: systemd unit + limits drop-in, launchd plist; PortAudio check
+      __init__.py         empty package marker
+      common.py           Runner (injectable for tests), ServiceError, the installed stt-daemon script's path
+      systemd.py          unit and limits.conf rendering, ExecStart escaping; install/remove/status/logs
+      launchd.py          macOS agent plist (TMPDIR kept for the socket); launchctl calls; untested on a Mac
+      preflight.py        PortAudio load check; install command per distro from /etc/os-release
+    cli.py                `stt-daemon` entry point: run, service, key set, backend set-default, listen
+    control.py            one blocking request to the running daemon (hello, command, reply); `reload` after key set
+    listen.py             `listen`: session client printing events; terminal keys (Enter, marker key, Ctrl-C)
     daemon.py             `run`: config, credentials, mic, server; SIGTERM/SIGINT shutdown
     config.py             config.toml loading, defaults, validation; config/socket paths per OS; in-place key writer
     credentials.py        API keys: mode-600 credentials.toml, <BACKEND>_API_KEY env, stdin keys; key writer
@@ -89,7 +97,8 @@ tests/
     test_peer.py          peer pid/cmdline over real Unix sockets; macOS parsing on fixture bytes
     test_messages.py      envelope parsing, encoding, per-command field checks
     test_backend_set.py   setup and default, language default and checks, features, hints, context lookup
-    test_cli.py           run with a broken config
+    test_cli.py           run (broken config, --keys-stdin), key set default rule, set-default, service install files
+    test_service.py       unit/plist rendering, ExecStart escaping, systemctl calls, remove guard, PortAudio hints
   integration/            real daemon over a socket, WAV capture, fake backend
     conftest.py           `daemon` fixture
     harness.py            in-process Server on a temp socket; test clients; fixture helpers
@@ -97,6 +106,7 @@ tests/
     test_daemon_clients.py    hello gate, welcome, errors, busy and eviction, observers, disconnects, reload
     test_daemon_lifecycle.py  socket file, shutdown, context store, marker times
     test_daemon_speech.py     VAD event routing, speech_id starts (edge, expiry, mic closed, eviction)
+    test_cli_daemon.py        key set reloads the daemon; listen prints segments, exit codes
   live/                   opt-in (`pytest -m live`): real mic, real backend key
     test_elevenlabs_live.py  fixture to real EL: word times at the speech edges, padded tail, bad key
 pyproject.toml            package, deps, ruff/pyright/pytest settings

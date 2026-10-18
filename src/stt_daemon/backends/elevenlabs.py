@@ -80,6 +80,7 @@ CAPABILITIES = Capabilities(
 
 class ElevenLabsBackend(Backend):
     name = "elevenlabs"
+    takes_key = True
     capabilities = CAPABILITIES
 
     def __init__(self, config: ElevenLabsConfig, api_key: str) -> None:

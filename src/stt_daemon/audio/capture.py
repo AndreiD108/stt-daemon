@@ -10,12 +10,21 @@ from collections.abc import Callable
 from typing import Any
 
 import numpy as np
-import sounddevice as sd
 
 from stt_daemon.audio.frames import Attachment, Frame, FrameHub, Samples
 
 log = logging.getLogger(__name__)
-_sd: Any = sd  # untyped module
+_sd: Any = None  # sounddevice, loaded on first use: it raises OSError when PortAudio is missing
+
+
+def _sounddevice() -> Any:
+    global _sd
+    if _sd is None:
+        import sounddevice
+
+        _sd = sounddevice
+    return _sd
+
 
 SAMPLE_RATE = 16000
 STALL_TIMEOUT_S = 2.0
@@ -133,7 +142,7 @@ def find_input_device(name: str) -> int:
     Empty `name` takes the system default input, else a PipeWire or Pulse device. Raw ALSA
     `hw:` devices are refused: they take the card exclusively and block other apps.
     """
-    devices: list[dict[str, Any]] = list(_sd.query_devices())
+    devices: list[dict[str, Any]] = list(_sounddevice().query_devices())
 
     def shared_input(index: int) -> bool:
         dev = devices[index]
@@ -144,7 +153,7 @@ def find_input_device(name: str) -> int:
             if name in str(dev.get("name")) and shared_input(i):
                 return i
         raise RuntimeError(f"no shared input device matches {name!r} (raw hw: devices refused)")
-    default = _sd.default.device[0]
+    default = _sounddevice().default.device[0]
     if isinstance(default, int) and 0 <= default < len(devices) and shared_input(default):
         return default
     for wanted in AUTO_DEVICE_NAMES:
@@ -155,7 +164,7 @@ def find_input_device(name: str) -> int:
 
 
 def device_channels(device: int) -> int:
-    info: dict[str, Any] = _sd.query_devices(device, "input")
+    info: dict[str, Any] = _sounddevice().query_devices(device, "input")
     return min(int(info.get("max_input_channels", 1)), 2)
 
 
@@ -247,7 +256,7 @@ class MicCapture(CaptureSource):
         channels = device_channels(device)
         self._generation += 1
         generation = self._generation
-        stream = _sd.InputStream(
+        stream = _sounddevice().InputStream(
             callback=self._callback,
             finished_callback=lambda: self._request_recovery(
                 "PortAudio stream finished", generation=generation
