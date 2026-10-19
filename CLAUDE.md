@@ -36,7 +36,7 @@ src/                      package source
       elevenlabs.py       Scribe v2 Realtime: retrying open, padded short commits, in-order acks, pad-free word times
       elevenlabs_wire.py  EL language codes, error message → (code, retryable)
       fake.py             FakeBackend for tests: scripted replies, partials, delays, failures, warnings, time limit
-      parakeet.py         local Parakeet TDT on sherpa-onnx: one cached recognizer, decode per commit, token → word times
+      parakeet.py         local Parakeet TDT on sherpa-onnx: shared recognizer (load at open, decodes in turn, idle unload), token → word times
       install.py          `backend install parakeet`: download, SHA-256 check, unpack, bpe.vocab from tokens.txt
     server/               the socket side: connections, commands, mic and backend slots, event routing
       __init__.py         empty package marker
@@ -91,19 +91,20 @@ tests/
     test_pause_gate.py    held silence, pre-speech pad, short vs long pauses, flush
     test_markers.py       word-gap placement, char fallback, empty text, queue
     test_transcript.py    final-text joining, empty segments
-    test_session_audio.py   fixture sessions: word times through a cut, several commits, stop/cancel
+    test_session_audio.py   fixture sessions: word times through a cut, several commits, chunk cap, stop/cancel
     test_session_lifecycle.py  silent sessions: leftover markers, marker refusals, failure, failed open
     test_recovery.py      link alone: replay tail and pacing, retries, give-up, idle drop, hung send, rollover
     test_recovery_edges.py  close-time ack, unknown provider cuts, final-ack failure, in-flight commit/stop
     test_session_recovery.py  fixture sessions: word times, markers, give-up, bounded stop during recovery
-    test_config.py        paths per OS, defaults, type errors, config writer
+    test_config.py        paths per OS, defaults, type errors, Parakeet limits, config writer and key removal
     test_credentials.py   mode/owner checks, precedence, writer, stdin parsing, no key in errors
     test_slot.py          slot states, sticky evictable, takeover order and failures, client_gone
     test_peer.py          peer pid/cmdline over real Unix sockets; macOS parsing on fixture bytes
     test_messages.py      envelope parsing, encoding, per-command field checks
     test_backend_set.py   setup and default, language default and checks, features, hints, context lookup
-    test_cli.py           run (broken config, --keys-stdin), key set and backend install default rule, set-default, service files
-    test_parakeet.py      token → word grouping, hotwords, per-commit decoding, failures, recognizer swap, model check
+    test_cli.py           run (broken config, --keys-stdin), key set and backend install default rule, set-default, backend remove, service files
+    test_parakeet.py      token → word grouping, hotwords, per-commit decoding, failures, model check
+    test_parakeet_engine.py  load at open, one recognizer for all, decodes in turn, idle unload, load failure, reload
     test_install.py       bpe.vocab, unpack once, partial model replaced, bad download / archive leaves nothing
     test_service.py       unit/plist rendering, ExecStart escaping, systemctl calls, remove guard, PortAudio hints
   integration/            real daemon over a socket, WAV capture, fake backend
@@ -114,7 +115,7 @@ tests/
     test_daemon_lifecycle.py  socket file, shutdown, context store, marker times
     test_daemon_speech.py     VAD event routing, speech_id starts (edge, expiry, mic closed, eviction)
     test_cli_daemon.py        key set reloads the daemon; listen prints segments, exit codes
-    test_parakeet_daemon.py   `slow`, real model: commits at pauses, word times at speech edges, beam with keyterms
+    test_parakeet_daemon.py   `slow`, real model: commits at pauses, word times at speech edges, keyterms per stream
   live/                   opt-in (`pytest -m live`): real mic, real backend key
     test_elevenlabs_live.py  fixture to real EL: word times at the speech edges, padded tail, bad key
 pyproject.toml            package, deps, ruff/pyright/pytest settings

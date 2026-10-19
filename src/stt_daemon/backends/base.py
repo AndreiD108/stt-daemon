@@ -82,6 +82,8 @@ class CommitPolicy:
     check_every_s: float | None = None
     """How often to check `interval_s`; it can cut mid-speech."""
     at_pauses: bool = False
+    max_chunk_s: float | None = None
+    """Commit once this much audio was sent since the last commit, pause or not."""
 
 
 @dataclass(frozen=True)

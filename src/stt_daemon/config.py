@@ -73,12 +73,22 @@ class ElevenLabsConfig:
     max_sessions: int = DEFAULT_MAX_SESSIONS
 
 
+def default_num_threads() -> int:
+    """Leaves two cores to the rest of the machine; at most 4."""
+    return min(4, max(1, (os.cpu_count() or 1) - 2))
+
+
 @dataclass
 class ParakeetConfig:
     keyterms: list[str] = field(default_factory=list[str])
     hotwords_score: float = 1.5
     """Bias per keyterm token in beam search; too high and keyterms replace similar words."""
     max_sessions: int = DEFAULT_MAX_SESSIONS
+    num_threads: int = field(default_factory=default_num_threads)
+    max_chunk_seconds: float = 30.0
+    """Audio sent without a pause is committed once it reaches this length."""
+    unload_after_minutes: float = 10.0
+    """The model leaves memory this long after the last Parakeet session; 0 keeps it."""
 
 
 @dataclass
@@ -218,8 +228,13 @@ def _validate(config: Config, path: Path) -> None:
         0 <= vad.pause_keep_ms <= vad.min_silence_ms, "vad.pause_keep_ms", "0 to vad.min_silence_ms"
     )
     check(config.session.stop_wait_ms > 0, "session.stop_wait_ms", "positive")
-    score = config.backends.parakeet.hotwords_score
-    check(0 < score <= 10, "backends.parakeet.hotwords_score", "above 0, at most 10")
+    parakeet = config.backends.parakeet
+    check(
+        0 < parakeet.hotwords_score <= 10, "backends.parakeet.hotwords_score", "above 0, at most 10"
+    )
+    check(parakeet.num_threads >= 1, "backends.parakeet.num_threads", "1 or more")
+    check(parakeet.max_chunk_seconds >= 5, "backends.parakeet.max_chunk_seconds", "5 or more")
+    check(parakeet.unload_after_minutes >= 0, "backends.parakeet.unload_after_minutes", "0 or more")
     for name, section in (
         ("elevenlabs", config.backends.elevenlabs),
         ("parakeet", config.backends.parakeet),
@@ -237,54 +252,86 @@ _HEADER = re.compile(r"^\s*\[\s*([^\[\]]+?)\s*\]\s*(#.*)?$")
 def set_config_string(section: str, key: str, value: str, path: Path | None = None) -> None:
     """Sets `[section] key = "value"` in the config file, keeping the rest of its text."""
     path = config_path() if path is None else path
+    original, expected = _read_toml(path)
+    _table(expected, section, path)[key] = value
+    lines = original.splitlines(keepends=True)
+    new_line = f"{key} = {toml_string(value)}\n"
+    found = _find_key(lines, section, key)
+    if found is None:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines += ([] if not lines else ["\n"]) + [f"[{section}]\n", new_line]
+    elif (existing := found[1]) is None:
+        lines.insert(found[0] + 1, new_line)
+    else:
+        lines[existing] = new_line
+    _write_checked(path, "".join(lines), expected, f"set {section}.{key}")
+
+
+def remove_config_key(section: str, key: str, path: Path | None = None) -> None:
+    """Deletes `[section] key` from the config file, if there, keeping the rest of its text."""
+    path = config_path() if path is None else path
+    if not path.exists():
+        return
+    original, expected = _read_toml(path)
+    if _table(expected, section, path).pop(key, None) is None:
+        return
+    lines = original.splitlines(keepends=True)
+    found = _find_key(lines, section, key)
+    if found is not None and found[1] is not None:
+        del lines[found[1]]
+    _write_checked(path, "".join(lines), expected, f"remove {section}.{key}")
+
+
+def _read_toml(path: Path) -> tuple[str, dict[str, Any]]:
     try:
         original = path.read_text()
     except FileNotFoundError:
         original = ""
     try:
-        expected: dict[str, Any] = tomllib.loads(original)
+        return original, tomllib.loads(original)
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{path}: invalid TOML: {exc}") from None
-    node = expected
+
+
+def _table(root: dict[str, Any], section: str, path: Path) -> dict[str, Any]:
+    node = root
     for part in section.split("."):
         child: Any = node.setdefault(part, {})
         if not isinstance(child, dict):
             raise ConfigError(f"{path}: {section} is not a table; edit the file by hand")
         node = typing.cast(dict[str, Any], child)
-    node[key] = value
-    lines = original.splitlines(keepends=True)
-    new_line = f"{key} = {toml_string(value)}\n"
-    key_line = re.compile(rf"^\s*{re.escape(key)}\s*=")
+    return node
+
+
+def _find_key(lines: list[str], section: str, key: str) -> tuple[int, int | None] | None:
+    """(header line, key line or None) of `[section]`; None without that header."""
     header_at = next(
         (i for i, line in enumerate(lines) if (m := _HEADER.match(line)) and m[1] == section),
         None,
     )
     if header_at is None:
-        if lines and not lines[-1].endswith("\n"):
-            lines[-1] += "\n"
-        lines += ([] if not lines else ["\n"]) + [f"[{section}]\n", new_line]
-    else:
-        end = next(
-            (
-                i
-                for i in range(header_at + 1, len(lines))
-                if _HEADER.match(lines[i]) or lines[i].lstrip().startswith("[[")
-            ),
-            len(lines),
-        )
-        existing = next((i for i in range(header_at + 1, end) if key_line.match(lines[i])), None)
-        if existing is None:
-            lines.insert(header_at + 1, new_line)
-        else:
-            lines[existing] = new_line
-    text = "".join(lines)
-    # The line edit is textual; it is kept only if it changed exactly this one value.
+        return None
+    end = next(
+        (
+            i
+            for i in range(header_at + 1, len(lines))
+            if _HEADER.match(lines[i]) or lines[i].lstrip().startswith("[[")
+        ),
+        len(lines),
+    )
+    key_line = re.compile(rf"^\s*{re.escape(key)}\s*=")
+    return header_at, next((i for i in range(header_at + 1, end) if key_line.match(lines[i])), None)
+
+
+def _write_checked(path: Path, text: str, expected: dict[str, Any], change: str) -> None:
+    # The line edit is textual; it is kept only if it made exactly this one change.
     try:
         written = tomllib.loads(text)
     except tomllib.TOMLDecodeError:
         written = None
     if written != expected:
-        raise ConfigError(f"{path}: could not set {section}.{key}; edit the file by hand")
+        raise ConfigError(f"{path}: could not {change}; edit the file by hand")
     atomic_write(path, text)
 
 

@@ -9,7 +9,9 @@ from stt_daemon.config import (
     Config,
     ConfigError,
     config_dir,
+    default_num_threads,
     load_config,
+    remove_config_key,
     set_config_string,
     socket_path,
 )
@@ -116,6 +118,32 @@ def test_max_sessions_must_be_at_least_one(tmp_path: Path, backend: str) -> None
     assert getattr(load_config(path).backends, backend).max_sessions == 1
 
 
+@pytest.mark.parametrize(
+    ("key", "bad", "good"),
+    [
+        ("num_threads", "0", "1"),
+        ("max_chunk_seconds", "4.5", "5"),
+        ("unload_after_minutes", "-1", "0"),
+    ],
+)
+def test_parakeet_lifecycle_limits(tmp_path: Path, key: str, bad: str, good: str) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(f"[backends.parakeet]\n{key} = {bad}\n")
+    with pytest.raises(ConfigError, match=rf"backends\.parakeet\.{key}"):
+        load_config(path)
+    path.write_text(f"[backends.parakeet]\n{key} = {good}\n")
+    assert getattr(load_config(path).backends.parakeet, key) == float(good)
+
+
+@pytest.mark.parametrize(("cpus", "threads"), [(None, 1), (1, 1), (3, 1), (4, 2), (6, 4), (32, 4)])
+def test_parakeet_threads_leave_two_cores_free(
+    monkeypatch: pytest.MonkeyPatch, cpus: int | None, threads: int
+) -> None:
+    monkeypatch.setattr(os, "cpu_count", lambda: cpus)
+    assert default_num_threads() == threads
+    assert Config().backends.parakeet.num_threads == threads
+
+
 def test_invalid_toml_fails_with_path(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
     path.write_text("[audio\n")
@@ -198,3 +226,31 @@ def test_set_string_refuses_what_it_cannot_express(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="edit the file by hand"):
         set_config_string("backends", "default", "parakeet", path)
     assert path.read_text() == original
+
+
+def test_remove_key_keeps_other_text(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    original = (
+        '# mine\n[backends]\n# which one\ndefault = "parakeet"  # local\n\n'
+        '[backends.parakeet]\ndefault = "x"\n'
+    )
+    path.write_text(original)
+    remove_config_key("backends", "default", path)
+    assert path.read_text() == original.replace('default = "parakeet"  # local\n', "")
+
+
+def test_remove_key_without_the_key_or_the_file_changes_nothing(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    remove_config_key("backends", "default", path)
+    assert not path.exists()
+    path.write_text("[audio]\nbuffer_ms = 4000\n")
+    remove_config_key("backends", "default", path)
+    assert path.read_text() == "[audio]\nbuffer_ms = 4000\n"
+
+
+def test_remove_key_refuses_what_it_cannot_express(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('backends.default = "parakeet"\n')
+    with pytest.raises(ConfigError, match="edit the file by hand"):
+        remove_config_key("backends", "default", path)
+    assert path.read_text() == 'backends.default = "parakeet"\n'

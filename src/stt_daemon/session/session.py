@@ -103,6 +103,7 @@ class Session:
         self._attachment: Attachment | None = None
         self._boundary_s: dict[int, float] = {}
         self._speech_since_commit = False
+        self._samples_since_commit = 0
         self._last_commit_at = 0.0
         self._audio_task: asyncio.Task[None] | None = None
         self._commit_task: asyncio.Task[None] | None = None
@@ -243,6 +244,9 @@ class Session:
         paused = any(isinstance(e, SpeechEnded) for e in events)
         if policy.at_pauses and paused and self._speech_since_commit:
             self._commit()
+        cap = policy.max_chunk_s
+        if cap is not None and self._samples_since_commit >= cap * self._capture.sample_rate:
+            self._commit()
         assert self._link is not None
         self._link.tick(speaking=self._vad.speech_id is not None)
 
@@ -257,12 +261,14 @@ class Session:
     def _queue(self, out: Outgoing) -> None:
         assert self._link is not None
         self._link.queue(out)
+        self._samples_since_commit += out.frame.samples.size
         if self._gate.speaking:
             self._speech_since_commit = True
 
     def _commit(self, *, final: bool = False) -> None:
         assert self._link is not None
         self._link.commit(final=final)
+        self._samples_since_commit = 0
         self._speech_since_commit = False
         self._last_commit_at = time.monotonic()
 

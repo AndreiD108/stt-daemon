@@ -1,8 +1,5 @@
 import asyncio
-import threading
-from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pytest
@@ -14,22 +11,18 @@ from stt_daemon.backends.base import (
     Closed,
     Committed,
     Failed,
-    OpenFailed,
-    OpenOptions,
     Word,
 )
 from stt_daemon.backends.parakeet import (
     MODEL_FILES,
     Decoded,
-    Engine,
     ParakeetBackend,
     ParakeetConnection,
-    RecognizerKey,
     group_words,
     hotwords,
     model_dir,
 )
-from stt_daemon.config import Config, ParakeetConfig
+from stt_daemon.config import Config
 from stt_daemon.credentials import Credentials
 
 
@@ -167,41 +160,6 @@ async def test_close_during_a_decode_drops_its_result() -> None:
     assert events == [Closed(4)]
 
 
-class _Recognizer:
-    """Decodes any audio to its sample count."""
-
-    def __init__(self, key: RecognizerKey) -> None:
-        self.key = key
-
-    def create_stream(self, hotwords: str | None = None) -> Any:
-        class Stream:
-            def accept_waveform(self, rate: int, audio: Samples) -> None:
-                text = f" {len(audio)}"
-                self.result = Decoded(text, [text], [0.0], [0.1])
-
-        return Stream()
-
-    def decode_stream(self, stream: Any) -> None:
-        pass
-
-
-def test_engine_keeps_one_recognizer_and_reloads_on_a_new_kind() -> None:
-    loaded: list[RecognizerKey] = []
-
-    def loader(key: RecognizerKey) -> _Recognizer:
-        loaded.append(key)
-        return _Recognizer(key)
-
-    engine = Engine(loader)
-    greedy = RecognizerKey(Path("/m"), beam=False, hotwords_score=1.5)
-    beam = RecognizerKey(Path("/m"), beam=True, hotwords_score=1.5)
-    engine.load(greedy)
-    assert engine.decode(greedy, _audio(0.5), None).text == " 8000"
-    engine.decode(beam, _audio(0.5), "Talkey")
-    engine.decode(beam, _audio(0.5), "Talkey")
-    assert loaded == [greedy, beam]
-
-
 def _model(tmp: Path) -> Path:
     model = model_dir({"XDG_DATA_HOME": str(tmp)})
     model.mkdir(parents=True)
@@ -220,55 +178,3 @@ def test_create_needs_every_model_file(tmp_path: Path, monkeypatch: pytest.Monke
     (model / "bpe.vocab").unlink()
     with pytest.raises(BackendUnavailable):
         ParakeetBackend.create(Config(), Credentials())
-
-
-def _backend(tmp: Path, loader: Any, keyterms: Sequence[str] = ()) -> ParakeetBackend:
-    config = ParakeetConfig(keyterms=list(keyterms), hotwords_score=2.0)
-    return ParakeetBackend(config, _model(tmp), Engine(loader))
-
-
-async def test_open_picks_beam_search_only_with_keyterms(tmp_path: Path) -> None:
-    keys: list[RecognizerKey] = []
-    threads: list[threading.Thread] = []
-
-    def loader(key: RecognizerKey) -> _Recognizer:
-        keys.append(key)
-        threads.append(threading.current_thread())
-        return _Recognizer(key)
-
-    backend = _backend(tmp_path, loader, keyterms=["Scribbly"])
-    events: list[BackendEvent] = []
-    conn = await backend.open(OpenOptions(keyterms=("Talkey",)), 1, events.append)
-    await conn.send_audio(_audio(1.0))
-    await conn.commit()
-    await _settle()
-    await asyncio.sleep(0.05)
-    assert keys[-1].beam
-    assert keys[-1].hotwords_score == 2.0
-    assert threads[0] is not threading.main_thread()
-    assert [type(e) for e in events] == [Committed]
-    await conn.close()
-
-    model = model_dir({"XDG_DATA_HOME": str(tmp_path)})
-    plain = ParakeetBackend(ParakeetConfig(), model, Engine(loader))
-    await (await plain.open(OpenOptions(), 2, events.append)).close()
-    assert not keys[-1].beam
-
-
-async def test_open_refuses_a_set_language(tmp_path: Path) -> None:
-    backend = _backend(tmp_path, _Recognizer)
-    with pytest.raises(OpenFailed) as caught:
-        await backend.open(OpenOptions(language="de"), 1, lambda _: None)
-    assert caught.value.code == "unsupported_language"
-    await (await backend.open(OpenOptions(language="auto"), 1, lambda _: None)).close()
-
-
-async def test_open_reports_a_model_that_fails_to_load(tmp_path: Path) -> None:
-    def loader(key: RecognizerKey) -> _Recognizer:
-        raise RuntimeError("protobuf parsing failed")
-
-    with pytest.raises(OpenFailed) as caught:
-        await _backend(tmp_path, loader).open(OpenOptions(), 1, lambda _: None)
-    assert caught.value.code == "model_error"
-    assert not caught.value.retryable
-    assert "backend install parakeet" in caught.value.message

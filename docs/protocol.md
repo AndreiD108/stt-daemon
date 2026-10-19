@@ -191,8 +191,10 @@ as for `stop_session`.
 ```
 
 Re-reads config and credentials and rescans installed backends. Sent by the `stt-daemon` CLI after
-`key set`, `backend install` and `backend set-default`. A running session keeps its backend,
-even one no longer set up. A new `max_sessions` applies to the next start; a backend over its new
+`key set`, `backend install`, `backend remove` and `backend set-default`. A running session keeps
+its backend, even one no longer set up; a removed Parakeet model leaves memory when its last
+session ends. New `backends.parakeet.num_threads` and `hotwords_score` values apply once no
+Parakeet session is running. A new `max_sessions` applies to the next start; a backend over its new
 capacity keeps its sessions until they end. When backends or capacities change, a `slot` event
 follows the `backends` event. Changes to `[audio]` and `[slot]` take effect when the daemon
 restarts. `[vad]` changes apply to
@@ -317,6 +319,10 @@ released, and when a `reload` changes the backends or their `max_sessions`.
   before the backend trims it; `null` when none.
 - `client_label`, `session_label`, `language`: `null` when not set.
 - The client fields let observers tell sessions apart without waiting for `slot`.
+- Parakeet sends `session_started` without waiting for its model to load (about 1 s when it is
+  not in memory; it leaves memory 10 minutes after the last Parakeet session). The audio is kept
+  and transcribed once the model is in; a model that fails to load ends the session with
+  `model_error`.
 
 ### `partial`
 
@@ -357,8 +363,10 @@ previous one; a `segment` replaces the partial. Only with `partials: true`.
 - When segments commit is up to the backend. Timed commits are checked every 5 s and need speech
   sent since the last commit, so they can cut mid-speech. ElevenLabs: 25 s after the last commit
   (ElevenLabs advises 20–30 s), before each connection rollover (about every 13 minutes), and at
-  stop. Parakeet, which transcribes
-  after the fact: at each pause the VAD reports, 30 s after the last commit, and at stop.
+  stop. Parakeet, which transcribes after the fact: at each pause the VAD reports, once 30 s of
+  audio was sent with no pause (config `backends.parakeet.max_chunk_seconds`), and at stop.
+  Parakeet sessions share one model and take turns to transcribe, so a commit can wait for
+  another session's.
 
 ### `session_ended`
 

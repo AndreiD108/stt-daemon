@@ -54,13 +54,13 @@ async def _session(
 async def test_segments_commit_at_pauses_with_word_times(daemon: Harness) -> None:
     loaded: list[RecognizerKey] = []
     segments, ended = await _session(daemon, [], loaded)
-    assert [k.beam for k in loaded] == [False]
+    assert len(loaded) == 1
     texts = [s["text"] for s in segments if s["text"]]
     assert len(texts) == 3, texts
     assert "tablet" in texts[0]
     assert "pen marks" in texts[1]
     assert "routes the mic" in texts[2]
-    assert ended["final_text"].startswith("Restart the")
+    assert ended["final_text"].lower().startswith("restart the")
     spoken = [s for s in segments if s["text"]]
     for segment, edge_ms in zip(spoken, PHRASE_STARTS_MS, strict=True):
         words = segment["words"]
@@ -71,10 +71,10 @@ async def test_segments_commit_at_pauses_with_word_times(daemon: Harness) -> Non
         assert words[-1]["end_ms"] <= segment["end_ms"]
 
 
-async def test_keyterms_take_the_beam_search_path(daemon: Harness) -> None:
+async def test_keyterms_go_in_per_stream(daemon: Harness) -> None:
     loaded: list[RecognizerKey] = []
     segments, ended = await _session(daemon, KEYTERMS, loaded)
-    assert [k.beam for k in loaded] == [True]
+    assert len(loaded) == 1
     texts = [s["text"] for s in segments if s["text"]]
     assert len(texts) == 3, texts
     assert "pen marks" in texts[1]

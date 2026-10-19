@@ -171,3 +171,22 @@ async def test_cancel_keeps_committed_text_and_drops_the_rest() -> None:
     assert [s.text for s in segments(events)] == ["kept"]
     assert ended == SessionEnded("cancelled", "kept", ended.duration_ms, 1)
     assert events[-1] == ended
+
+
+async def test_a_chunk_without_a_pause_commits_at_the_cap() -> None:
+    policy = CommitPolicy(max_chunk_s=1.0)
+    backend = FakeBackend(
+        ["a", "b", "c", "d", "e", "f"],
+        capabilities=replace(FAKE_CAPABILITIES, commit_policy=policy),
+    )
+    capture, session, _ = await run(backend)
+    try:
+        await asyncio.to_thread(capture.wait_idle, 15)
+        await session.stop()
+    finally:
+        await capture.stop()
+    spans = backend.connections[0].commit_spans
+    assert len(spans) >= 4
+    for start, end in spans[:-1]:
+        assert 1.0 <= end - start < 1.1, spans
+    assert spans[-1][1] - spans[-1][0] < 1.1

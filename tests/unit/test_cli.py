@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from stt_daemon import cli, daemon
+from stt_daemon import cli, control, daemon
 from stt_daemon.backends.install import InstallError
 from stt_daemon.backends.parakeet import MODEL_FILES, model_dir
 from stt_daemon.cli import main
@@ -141,6 +141,84 @@ def test_backend_install_failure_exits_1(
     assert main(["backend", "install", "parakeet"]) == 1
     assert "connection refused" in capsys.readouterr().err
     assert not (home / "config.toml").exists()
+
+
+def _installed() -> Path:
+    model = model_dir()
+    model.mkdir(parents=True)
+    for name in MODEL_FILES:
+        (model / name).write_text("x")
+    return model
+
+
+def test_backend_remove_moves_the_default_to_the_other_backend(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    model = _installed()
+    write_key("elevenlabs", "sk-abc123")
+    home.joinpath("config.toml").write_text('[backends]\ndefault = "parakeet"\n')
+    requests: list[str] = []
+
+    def request(kind: str) -> dict[str, object]:
+        requests.append(kind)
+        return {"backends": [{"name": "elevenlabs"}], "default_backend": "elevenlabs"}
+
+    monkeypatch.setattr(control, "request", request)
+    assert main(["backend", "remove", "parakeet"]) == 0
+    assert not model.exists()
+    assert _default_backend(home) == "elevenlabs"
+    assert requests == ["reload"]
+    out = capsys.readouterr().out
+    assert str(model) in out
+    assert "elevenlabs is the default backend" in out
+
+
+def test_backend_remove_of_the_only_backend_leaves_no_default(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _installed()
+    home.mkdir()
+    home.joinpath("config.toml").write_text('[backends]\ndefault = "parakeet"\n')
+    assert main(["backend", "remove", "parakeet"]) == 0
+    assert _default_backend(home) is None
+    out = capsys.readouterr().out
+    assert "no default backend" in out
+    assert "not running" in out
+
+
+def test_backend_remove_keeps_another_default(home: Path) -> None:
+    _installed()
+    write_key("elevenlabs", "sk-abc123")
+    home.joinpath("config.toml").write_text('[backends]\ndefault = "elevenlabs"\n')
+    assert main(["backend", "remove", "parakeet"]) == 0
+    assert _default_backend(home) == "elevenlabs"
+
+
+def test_backend_remove_keeps_the_model_when_the_config_cannot_be_edited(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    model = _installed()
+    home.mkdir()
+    home.joinpath("config.toml").write_text('backends.default = "parakeet"\n')
+    assert main(["backend", "remove", "parakeet"]) == 1
+    assert "edit the file by hand" in capsys.readouterr().err
+    assert model.exists()
+
+
+def test_backend_remove_refuses_a_model_that_is_not_installed(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["backend", "remove", "parakeet"]) == 1
+    assert str(model_dir()) in capsys.readouterr().err
+
+
+def test_backend_remove_names_parakeet_as_the_only_removable_backend(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exited:
+        main(["backend", "remove", "elevenlabs"])
+    assert exited.value.code == 2
+    assert "parakeet" in capsys.readouterr().err
 
 
 def test_service_install_with_a_unit_dir_writes_files_without_systemctl(

@@ -65,7 +65,8 @@ stt-daemon backend install parakeet    # local: downloads the model, 487 MB
 ```
 
 One is enough. The first one you set up becomes the default;
-`stt-daemon backend set-default parakeet` changes it. Keys live in
+`stt-daemon backend set-default parakeet` changes it, and
+`stt-daemon backend remove parakeet` deletes the model again. Keys live in
 `~/.config/stt-daemon/credentials.toml`, readable by you only. Then:
 
 ```sh

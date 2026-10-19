@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import getpass
+import shutil
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -8,7 +9,14 @@ from pathlib import Path
 from stt_daemon import __version__, control
 from stt_daemon.backends import BACKENDS
 from stt_daemon.backends.install import CREDIT, InstallError, install_parakeet
-from stt_daemon.config import ConfigError, load_config, set_config_string, socket_path
+from stt_daemon.backends.parakeet import model_dir
+from stt_daemon.config import (
+    ConfigError,
+    load_config,
+    remove_config_key,
+    set_config_string,
+    socket_path,
+)
 from stt_daemon.credentials import (
     CredentialsError,
     load_credentials,
@@ -40,6 +48,8 @@ def main(argv: list[str] | None = None) -> int:
                 return _key_set(args.backend)
             case "backend" if args.action == "install":
                 return _install(args.backend)
+            case "backend" if args.action == "remove":
+                return _remove(args.backend)
             case "backend":
                 return _set_default(args.backend)
             case "listen":
@@ -96,6 +106,10 @@ def _parser() -> argparse.ArgumentParser:
         "install", help="download a local backend's model and tell the daemon"
     )
     install.add_argument("backend", choices=["parakeet"])
+    remove = backend_actions.add_parser(
+        "remove", help="delete a local backend's model and tell the daemon"
+    )
+    remove.add_argument("backend", choices=["parakeet"])
 
     listen = commands.add_parser("listen", help="start a session and print what it hears")
     listen.add_argument("--backend", help="default: the daemon's default backend")
@@ -185,6 +199,26 @@ def _install(backend: str) -> int:
     path, installed = install_parakeet()
     print(f"{backend} {'is installed in' if installed else 'was already in'} {path} ({CREDIT})")
     _pin_default(before, backend)
+    return _reload_daemon()
+
+
+def _remove(backend: str) -> int:
+    model = model_dir()
+    if not model.exists():
+        return _fail(f"{backend} is not installed: there is no model in {model}")
+    config = load_config()
+    if config.backends.default == backend:
+        from stt_daemon.server.backend_set import load_setup
+
+        setup = load_setup(config, load_credentials())
+        if (other := next((n for n in setup.backends if n != backend), None)) is not None:
+            set_config_string("backends", "default", other)
+        else:
+            remove_config_key("backends", "default")
+    shutil.rmtree(model)
+    print(f"deleted {model}")
+    after = _effective_default()
+    print(f"{after} is the default backend" if after else "no default backend")
     return _reload_daemon()
 
 

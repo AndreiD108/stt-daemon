@@ -1,7 +1,7 @@
 """NVIDIA Parakeet TDT 0.6B v3 on this machine, through sherpa-onnx.
 
 An after-the-fact backend: audio is buffered and each commit decodes what came since the last one,
-in a worker thread. Greedy decoding without keyterms; with them, beam search with hotwords.
+in a worker thread. Beam search; a session's keyterms go in as hotwords on each decode.
 """
 
 from __future__ import annotations
@@ -9,10 +9,8 @@ from __future__ import annotations
 import asyncio
 import collections
 import logging
-import os
-import threading
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Self
 
@@ -58,7 +56,7 @@ CAPABILITIES = Capabilities(
     partials=False,
     hints=frozenset({"keyterms"}),
     max_connection_s=None,
-    commit_policy=CommitPolicy(interval_s=30.0, check_every_s=5.0, at_pauses=True),
+    commit_policy=CommitPolicy(at_pauses=True, max_chunk_s=30.0),
 )
 
 
@@ -78,7 +76,7 @@ class Decoded:
 @dataclass(frozen=True)
 class RecognizerKey:
     model: Path
-    beam: bool
+    num_threads: int
     hotwords_score: float
 
 
@@ -94,8 +92,8 @@ def load_recognizer(key: RecognizerKey) -> Any:
         decoder=str(m / DECODER),
         joiner=str(m / JOINER),
         tokens=str(m / TOKENS),
-        num_threads=min(4, os.cpu_count() or 1),
-        decoding_method="modified_beam_search" if key.beam else "greedy_search",
+        num_threads=key.num_threads,
+        decoding_method="modified_beam_search",
         model_type="nemo_transducer",
         modeling_unit="bpe",
         bpe_vocab=str(m / BPE_VOCAB),
@@ -103,39 +101,117 @@ def load_recognizer(key: RecognizerKey) -> Any:
     )
 
 
-class Engine:
-    """The daemon's one loaded recognizer (~700 MB); loading another kind replaces it.
+def _decode(recognizer: Any, audio: Samples, hotwords: str | None) -> Decoded:
+    stream = recognizer.create_stream(hotwords) if hotwords else recognizer.create_stream()
+    stream.accept_waveform(SAMPLE_RATE, audio)
+    recognizer.decode_stream(stream)
+    result = stream.result
+    return Decoded(
+        result.text, list(result.tokens), list(result.timestamps), list(result.durations)
+    )
 
-    Blocking; call from worker threads. Loads and decodes take turns."""
+
+class Engine:
+    """The daemon's one Parakeet recognizer (~700 MB), shared by every connection on it.
+
+    `acquire` loads it in a thread unless it is loaded; decodes take turns; once no connection
+    uses it, it is dropped after the idle time. Runs on the event loop."""
 
     def __init__(self, loader: Loader = load_recognizer) -> None:
         self._loader = loader
-        self._lock = threading.Lock()
         self._key: RecognizerKey | None = None
-        self._recognizer: Any = None
+        self._recognizer: asyncio.Future[Any] | None = None
+        self._decoding = asyncio.Lock()
+        self._users = 0
+        self._unload_after_s: float | None = None
+        self._unload_timer: asyncio.TimerHandle | None = None
+        self._unload_when_idle = False
 
-    def load(self, key: RecognizerKey) -> None:
-        with self._lock:
-            self._load(key)
+    @property
+    def users(self) -> int:
+        return self._users
 
-    def decode(self, key: RecognizerKey, audio: Samples, hotwords: str | None) -> Decoded:
-        with self._lock:
-            recognizer = self._load(key)
-            stream = recognizer.create_stream(hotwords) if hotwords else recognizer.create_stream()
-            stream.accept_waveform(SAMPLE_RATE, audio)
-            recognizer.decode_stream(stream)
-            result = stream.result
-            return Decoded(
-                result.text, list(result.tokens), list(result.timestamps), list(result.durations)
+    @property
+    def loaded(self) -> bool:
+        r = self._recognizer
+        return r is not None and r.done() and not r.cancelled() and r.exception() is None
+
+    def acquire(self, key: RecognizerKey, unload_after_s: float | None) -> asyncio.Future[Any]:
+        """One more user. The future gives the recognizer once loaded; shield it when awaiting.
+        A different key (config changed) takes effect once no one uses the loaded one."""
+        replace_idle = self._key != key and self._users == 0
+        self._users += 1
+        self._unload_after_s = unload_after_s
+        self._unload_when_idle = False
+        self._cancel_timer()
+        if self._recognizer is None or replace_idle:
+            self._key = key
+            loading = asyncio.get_running_loop().run_in_executor(None, self._load, key)
+            loading.add_done_callback(self._load_done)
+            self._recognizer = loading
+        return self._recognizer
+
+    def release(self) -> None:
+        self._users -= 1
+        if self._users:
+            return
+        if self._unload_when_idle:
+            self.unload()
+        elif self._unload_after_s is not None:
+            self._unload_timer = asyncio.get_running_loop().call_later(
+                self._unload_after_s, self.unload
             )
 
+    def unload_when_idle(self) -> None:
+        """Now, or when the last user releases it (the model was removed)."""
+        if self._users:
+            self._unload_when_idle = True
+        else:
+            self.unload()
+
+    def unload(self) -> None:
+        if self._users:
+            return
+        self._cancel_timer()
+        if self.loaded:
+            log.info("unloading Parakeet")
+        self._recognizer, self._key = None, None
+
+    async def decode(self, recognizer: Any, audio: Samples, hotwords: str | None) -> Decoded:
+        # A decode counts as a user until its thread is done, even if its caller is cancelled.
+        self._users += 1
+        try:
+            await self._decoding.acquire()
+        except BaseException:
+            self.release()
+            raise
+        try:
+            work = asyncio.ensure_future(asyncio.to_thread(_decode, recognizer, audio, hotwords))
+        except BaseException:
+            self._decoding.release()
+            self.release()
+            raise
+
+        def done(_: asyncio.Future[Decoded]) -> None:
+            self._decoding.release()
+            self.release()
+
+        work.add_done_callback(done)
+        return await asyncio.shield(work)
+
     def _load(self, key: RecognizerKey) -> Any:
-        if self._key != key:
+        log.info("loading Parakeet from %s", key.model)
+        return self._loader(key)
+
+    def _load_done(self, loading: asyncio.Future[Any]) -> None:
+        failed = loading.cancelled() or loading.exception() is not None
+        if failed and loading is self._recognizer:
             self._recognizer, self._key = None, None
-            log.info("loading Parakeet (%s)", "beam search" if key.beam else "greedy")
-            self._recognizer = self._loader(key)
-            self._key = key
-        return self._recognizer
+
+    def _cancel_timer(self) -> None:
+        if self._unload_timer is not None:
+            self._unload_timer.cancel()
+            self._unload_timer = None
 
 
 ENGINE = Engine()
@@ -166,14 +242,26 @@ def hotwords(terms: Sequence[str]) -> str | None:
     return "/".join(p for p in phrases if p) or None
 
 
+def missing_file(model: Path) -> Path | None:
+    return next((model / f for f in MODEL_FILES if not (model / f).is_file()), None)
+
+
+def _not_installed(missing: Path) -> str:
+    return (
+        f"the Parakeet model is not installed ({missing} is missing); "
+        "install it with `stt-daemon backend install parakeet`"
+    )
+
+
 class ParakeetBackend(Backend):
     name = "parakeet"
-    capabilities = CAPABILITIES
 
     def __init__(self, config: ParakeetConfig, model: Path, engine: Engine = ENGINE) -> None:
         self._config = config
         self._model = model
         self._engine = engine
+        policy = CommitPolicy(at_pauses=True, max_chunk_s=config.max_chunk_seconds)
+        self.capabilities = replace(CAPABILITIES, commit_policy=policy)
 
     def __repr__(self) -> str:
         return f"ParakeetBackend(model={str(self._model)!r})"
@@ -185,40 +273,47 @@ class ParakeetBackend(Backend):
     @classmethod
     def create(cls, config: Config, credentials: Credentials) -> Self:
         model = model_dir()
-        if missing := [f for f in MODEL_FILES if not (model / f).is_file()]:
-            raise BackendUnavailable(
-                "no_model",
-                f"the Parakeet model is not installed ({model / missing[0]} is missing); "
-                "install it with `stt-daemon backend install parakeet`",
-            )
+        if (missing := missing_file(model)) is not None:
+            raise BackendUnavailable("no_model", _not_installed(missing))
         return cls(config.backends.parakeet, model)
 
     async def open(
         self, options: OpenOptions, connection_id: int, sink: EventSink
     ) -> ParakeetConnection:
+        """Returns at once; the model loads meanwhile and the first decode waits for it."""
         if options.language not in (None, "auto"):
             raise OpenFailed(
                 "unsupported_language",
                 f"Parakeet detects the language itself; it can't take {options.language!r}",
                 retryable=False,
             )
+        if (missing := missing_file(self._model)) is not None:
+            raise OpenFailed("model_error", _not_installed(missing), retryable=False)
         terms = hotwords(merge_keyterms(self._config.keyterms, options.keyterms))
-        key = RecognizerKey(self._model, terms is not None, self._config.hotwords_score)
-        try:
-            await asyncio.to_thread(self._engine.load, key)
-        except Exception as exc:
-            log.exception("could not load the Parakeet model from %s", self._model)
-            raise OpenFailed(
-                "model_error",
-                f"could not load the Parakeet model from {self._model}: {exc}; "
-                f"delete {self._model} and run `stt-daemon backend install parakeet`",
-                retryable=False,
-            ) from None
+        key = RecognizerKey(self._model, self._config.num_threads, self._config.hotwords_score)
+        unload_after_s = self._config.unload_after_minutes * 60 or None
+        loading = self._engine.acquire(key, unload_after_s)
+        model = self._model
+
+        async def ready() -> None:
+            try:
+                await asyncio.shield(loading)
+            except Exception as exc:
+                log.error("could not load the Parakeet model from %s: %s", model, exc)
+                raise OpenFailed(
+                    "model_error",
+                    f"could not load the Parakeet model from {model}: {exc}; "
+                    f"delete {model} and run `stt-daemon backend install parakeet`",
+                    retryable=False,
+                ) from None
 
         async def decode(audio: Samples) -> Decoded:
-            return await asyncio.to_thread(self._engine.decode, key, audio, terms)
+            recognizer = await asyncio.shield(loading)
+            return await self._engine.decode(recognizer, audio, terms)
 
-        return ParakeetConnection(connection_id, sink, decode)
+        return ParakeetConnection(
+            connection_id, sink, decode, ready=ready, on_end=self._engine.release
+        )
 
 
 @dataclass(frozen=True)
@@ -235,10 +330,16 @@ class ParakeetConnection(Connection):
         connection_id: int,
         sink: EventSink,
         decode: Callable[[Samples], Awaitable[Decoded]],
+        *,
+        ready: Callable[[], Awaitable[None]] | None = None,
+        on_end: Callable[[], None] | None = None,
     ) -> None:
+        """`ready` raises OpenFailed when the model can't load; `on_end` is called once."""
         super().__init__(connection_id)
         self._sink = sink
         self._decode = decode
+        self._ready = ready
+        self._on_end = on_end
         self._chunks: list[Samples] = []
         self._sent_samples = 0
         self._committed_samples = 0
@@ -270,6 +371,12 @@ class ParakeetConnection(Connection):
         self._end(None)
 
     async def _decode_commits(self) -> None:
+        if self._ready is not None:
+            try:
+                await self._ready()
+            except OpenFailed as exc:
+                self._end(Failed(self.connection_id, exc.code, exc.message, exc.retryable))
+                return
         while True:
             await self._has_pending.wait()
             self._has_pending.clear()
@@ -310,6 +417,8 @@ class ParakeetConnection(Connection):
         self._chunks = []
         if asyncio.current_task() is not self._worker:
             self._worker.cancel()
+        if self._on_end is not None:
+            self._on_end()
         if failure is not None:
             self._sink(failure)
         self._sink(Closed(self.connection_id))
