@@ -176,6 +176,8 @@ def _service(args: argparse.Namespace) -> int:
                 print("the service is enabled and running; it starts at login")
             if problem := check_tool("ffmpeg"):
                 print(f"`stt-daemon transcribe` needs ffmpeg: {problem}")
+            if sys.platform == "linux" and (problem := check_tool("pw-record")):
+                print(f"system audio sessions need pw-record: {problem}")
             print(BACKEND_SETUP)
         case "remove":
             removed = manager.remove()

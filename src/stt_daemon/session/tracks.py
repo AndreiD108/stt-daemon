@@ -1,0 +1,217 @@
+"""One audio source of a session: capture → VAD → pause gate → link, committing on the backend's
+cadence. A session has one track, or two for system audio (`system` and `mic`), each with its
+own connection and timeline on the session's clock."""
+
+import asyncio
+import time
+from collections.abc import Callable, Coroutine
+from typing import Any, Protocol
+
+import numpy as np
+
+from ..audio.capture import CaptureSource
+from ..audio.frames import Attachment, Frame
+from ..audio.vad import WINDOW, SpeechEnded, StreamingVAD
+from ..backends.base import Backend, CommitPolicy, Committed, OpenFailed, OpenOptions
+from ..config import Config
+from .pause_gate import Outgoing, PauseGate
+from .recovery import Link
+from .segments import Segments
+from .timeline import Timeline
+
+END_OF_AUDIO = Frame(np.zeros(0, dtype=np.float32), 0.0, 16000)
+
+
+class TrackOwner(Protocol):
+    """The session a track reports to."""
+
+    def track_committed(self, track: "Track", event: Committed, final: bool) -> None: ...
+
+    def track_partial(self, track: "Track", text: str) -> None: ...
+
+    def track_error(self, track: "Track", code: str, message: str) -> None: ...
+
+    def track_fatal(self, track: "Track", code: str, message: str) -> None: ...
+
+    def track_failed(self, track: "Track", error: BaseException) -> None:
+        """Its audio loop raised."""
+        ...
+
+    async def after_frame(self, track: "Track") -> bool:
+        """Called after each frame; False ends the audio loop."""
+        ...
+
+
+class Track:
+    def __init__(
+        self,
+        *,
+        name: str | None,
+        owner: TrackOwner,
+        config: Config,
+        capture: CaptureSource,
+        backend: Backend,
+        segments: Segments,
+        at_pauses: bool,
+        chunk_cap_s: float | None,
+        wall_commits: bool,
+    ) -> None:
+        """`wall_commits`: commit on the backend's `interval_s` wall-clock cadence."""
+        self.name = name
+        self.capture = capture
+        self.segments = segments
+        self.audio_end = 0.0
+        """Monotonic end of the last captured audio the track took in."""
+        self.link: Link | None = None
+        self._owner = owner
+        self._config = config
+        self._backend = backend
+        rate = capture.sample_rate
+        self._vad = StreamingVAD(
+            sample_rate=rate,
+            threshold=config.vad.threshold,
+            min_speech_ms=config.vad.min_speech_ms,
+            min_silence_ms=config.vad.min_silence_ms,
+        )
+        pad_s = config.vad.pause_keep_ms / 1000
+        self._gate = PauseGate(
+            hold_s=self._vad.start_delay_s + pad_s + 2 * WINDOW / rate, pad_s=pad_s
+        )
+        self.timeline = Timeline(0.0, rate)
+        self._at_pauses = at_pauses
+        self._chunk_cap_s = chunk_cap_s
+        self._wall_commits = wall_commits
+        self._attachment: Attachment | None = None
+        self._speech_since_commit = False
+        self._samples_since_commit = 0
+        self._last_commit_at = 0.0
+        self._audio_task: asyncio.Task[None] | None = None
+        self._commit_task: asyncio.Task[None] | None = None
+        self._end_put: asyncio.Future[None] | None = None
+
+    def begin(self, attachment: Attachment, origin: float, options: OpenOptions) -> None:
+        """Take frames from `attachment`; session times count from `origin` (monotonic)."""
+        self._attachment = attachment
+        self.timeline = Timeline(origin, self.capture.sample_rate)
+        self.segments.timeline = self.timeline
+        self.audio_end = origin
+        self.link = Link(
+            backend=self._backend,
+            options=options,
+            timeline=self.timeline,
+            chunk_samples=self.capture.sample_rate * self._config.audio.chunk_ms // 1000,
+            on_committed=lambda event, final: self._owner.track_committed(self, event, final),
+            on_partial=lambda text: self._owner.track_partial(self, text),
+            on_error=lambda code, message: self._owner.track_error(self, code, message),
+            on_fatal=lambda code, message: self._owner.track_fatal(self, code, message),
+        )
+
+    async def open(self, make_room: Callable[[], Coroutine[Any, Any, bool]] | None) -> None:
+        """Open the link; on `concurrency_limit`, `make_room` may free a provider connection
+        for one more try. Raises `OpenFailed`."""
+        assert self.link is not None
+        try:
+            await self.link.open()
+        except OpenFailed as exc:
+            if exc.code != "concurrency_limit" or make_room is None or not await make_room():
+                raise
+            await self.link.open()
+
+    def run(self) -> None:
+        self._last_commit_at = time.monotonic()
+        self._audio_task = asyncio.create_task(self._audio_loop())
+        self._audio_task.add_done_callback(self._audio_loop_done)
+        policy = self._backend.capabilities.commit_policy
+        if policy.interval_s is not None and self._wall_commits:
+            self._commit_task = asyncio.create_task(self._commit_loop(policy))
+
+    def detach(self) -> None:
+        if self._attachment is not None:
+            self._attachment.detach()
+
+    def mark(self) -> tuple[object, ...] | None:
+        """Changes as audio is taken, sent or answered; None while suspended."""
+        link = self.link
+        assert link is not None
+        if link.suspended:
+            return None
+        return (self.audio_end, link.backlog_s, link.sent_samples)
+
+    async def stop_intake(self, *, drain: bool) -> None:
+        """Stop taking audio; with `drain`, first take what capture delivered before now."""
+        assert self._attachment is not None
+        assert self._audio_task is not None
+        self._attachment.detach()
+        if drain:
+            # A task, not put_nowait: a stream's queue is bounded. It runs after the frames
+            # capture already scheduled.
+            self._end_put = asyncio.ensure_future(self._attachment.queue.put(END_OF_AUDIO))
+        elif self._audio_task is not asyncio.current_task():
+            self._audio_task.cancel()
+            if self._end_put is not None:
+                self._end_put.cancel()
+        await asyncio.wait([self._audio_task])
+        if self._commit_task is not None:
+            self._commit_task.cancel()
+
+    async def flush(self) -> None:
+        """After `stop_intake`: send the held audio, commit, wait for every answer."""
+        for out in self._gate.flush():
+            self._queue(out)
+        self._commit(final=True)
+        assert self.link is not None
+        await self.link.settle()
+
+    async def _audio_loop(self) -> None:
+        assert self._attachment is not None
+        queue = self._attachment.queue
+        while (frame := await queue.get()) is not END_OF_AUDIO:
+            self._take(frame)
+            if not await self._owner.after_frame(self):
+                return
+
+    def _audio_loop_done(self, task: asyncio.Task[None]) -> None:
+        if not task.cancelled() and (error := task.exception()) is not None:
+            self._owner.track_failed(self, error)
+
+    def _take(self, frame: Frame) -> None:
+        # With an empty ring, the first live frame began before the session's first sample.
+        if frame.start < self.timeline.origin:
+            part = frame.since(self.timeline.origin)
+            if part is None:
+                return
+            frame = part
+        self.audio_end = frame.end
+        events = self._vad.push(frame)
+        for part in self._gate.push(frame, events):
+            self._queue(part)
+        paused = any(isinstance(e, SpeechEnded) for e in events)
+        if self._at_pauses and paused and self._speech_since_commit:
+            self._commit()
+        cap = self._chunk_cap_s
+        if cap is not None and self._samples_since_commit >= cap * self.capture.sample_rate:
+            self._commit()
+        assert self.link is not None
+        self.link.tick(speaking=self._vad.speech_id is not None)
+
+    async def _commit_loop(self, policy: CommitPolicy) -> None:
+        assert policy.interval_s is not None
+        while True:
+            await asyncio.sleep(policy.check_every_s or policy.interval_s)
+            due = time.monotonic() - self._last_commit_at >= policy.interval_s
+            if due and self._speech_since_commit:
+                self._commit()
+
+    def _queue(self, out: Outgoing) -> None:
+        assert self.link is not None
+        self.link.queue(out)
+        self._samples_since_commit += out.frame.samples.size
+        if self._gate.speaking:
+            self._speech_since_commit = True
+
+    def _commit(self, *, final: bool = False) -> None:
+        assert self.link is not None
+        self.link.commit(final=final)
+        self._samples_since_commit = 0
+        self._speech_since_commit = False
+        self._last_commit_at = time.monotonic()

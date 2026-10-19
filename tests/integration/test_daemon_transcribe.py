@@ -20,7 +20,7 @@ from stt_daemon.audio.wav_capture import read_wav
 from stt_daemon.backends.base import CommitPolicy
 from stt_daemon.backends.fake import FAKE_CAPABILITIES, FakeBackend, FakeReply
 from stt_daemon.config import Config, SessionConfig
-from stt_daemon.server import socket as server_socket
+from stt_daemon.server import starts as server_starts
 from stt_daemon.session import session as session_module
 
 needs_ffmpeg = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is not installed")
@@ -84,7 +84,7 @@ async def test_a_wav_file_in_chunks_commits_at_pauses_with_word_times_in_file_ti
 async def test_raw_pcm_at_16k_mono_needs_no_ffmpeg(
     daemon: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(server_socket, "check_tool", missing)
+    monkeypatch.setattr(server_starts, "check_tool", missing)
     await daemon.start(fake(["one two", "three four"]))
     client, _ = await daemon.connect("Scribbly")
     started = await client.request("transcribe", {"pcm": PCM_16K})
@@ -98,7 +98,7 @@ async def test_raw_pcm_at_16k_mono_needs_no_ffmpeg(
 async def test_without_ffmpeg_a_file_gets_tool_unavailable_and_the_slot_stays_free(
     daemon: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(server_socket, "check_tool", missing)
+    monkeypatch.setattr(server_starts, "check_tool", missing)
     await daemon.start(fake())
     client, _ = await daemon.connect("Scribbly")
     refused = await client.request("transcribe", {})

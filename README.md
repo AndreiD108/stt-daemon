@@ -29,8 +29,8 @@ minutes, in any language. Say hello, start a session, read what comes back:
 - **Markers.** Drop a marker at a moment and get it back between the words said then.
 - **Context.** The previous text per window or document, so a dictation picks up
   where it left off.
-- **Dictation first.** A dictation never waits for a file transcription on a full
-  backend: the file pauses, loses nothing, and goes on after.
+- **Dictation first.** A dictation never waits for a file or meeting transcription on
+  a full backend: the other session pauses, loses nothing, and goes on after.
 
 ![A client starts a session with key terms and gets VAD events, partials, and a segment with word times](docs/media/client.gif)
 
@@ -92,6 +92,14 @@ With `elevenlabs` as the default, files go to `elevenlabs-batch`: the daemon upl
 it is and prints the text when ElevenLabs answers. On Parakeet, the file goes through the daemon
 as fast as the model takes it, and `ffmpeg` must be on your PATH; anything ffmpeg reads works,
 audio or video. Either way, word times count from the start of the file.
+
+## Transcribe a meeting
+
+On Linux, a client can transcribe what your machine plays, a call or a video, with
+`start_system_session`. With `with_mic`, your mic is a second track, so both sides of a call come
+out as one transcript, each line marked `[system]` or `[mic]`. It runs next to your dictation and
+takes no mic slot. It needs `pw-record`, from your distribution's PipeWire tools;
+`stt-daemon service install` names the package when it is missing.
 
 ## Update
 

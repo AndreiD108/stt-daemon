@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 
 from stt_daemon.audio.capture import CaptureSource
+from stt_daemon.audio.pw_capture import PwRecordCapture
 from stt_daemon.audio.wav_capture import WavCapture
 from stt_daemon.backends.base import Backend, CommitPolicy
 from stt_daemon.backends.fake import FAKE_CAPABILITIES, FakeBackend, FakeReply
@@ -132,6 +133,7 @@ class Harness:
         capture: CaptureSource | None = None,
         config: Config | None = None,
         backends: dict[str, Backend] | None = None,
+        system_capture: Callable[[], PwRecordCapture] | None = None,
     ) -> Server:
         config = config or Config()
         if backends is None:
@@ -143,6 +145,7 @@ class Harness:
             capture=capture,
             setup=setup_with(config, backends),
             reload_setup=self._reload,
+            system_capture=system_capture or PwRecordCapture,
         )
         await server.start()
         return server

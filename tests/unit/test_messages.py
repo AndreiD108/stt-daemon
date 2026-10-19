@@ -13,6 +13,7 @@ from stt_daemon.server.messages import (
     parse_line,
     parse_marker,
     parse_start,
+    parse_system,
     parse_transcribe,
 )
 
@@ -127,6 +128,18 @@ def test_transcribe_takes_start_fields_and_pcm_but_no_speech_id() -> None:
         [16000, 1],
     ):
         assert code_of(parse_transcribe, {"pcm": pcm}) == ("bad_request", "pcm")
+
+
+def test_system_takes_start_fields_and_with_mic_but_no_speech_id() -> None:
+    request = parse_system({"backend": "fake", "with_mic": True, "keyterms": ["Scribbly"]})
+    assert (request.start.backend, request.start.keyterms, request.with_mic) == (
+        "fake",
+        ("Scribbly",),
+        True,
+    )
+    assert parse_system({}).with_mic is False
+    assert code_of(parse_system, {"speech_id": "s1"}) == ("bad_request", "speech_id")
+    assert code_of(parse_system, {"with_mic": "yes"}) == ("bad_request", "with_mic")
 
 
 def test_diarize_and_num_speakers() -> None:

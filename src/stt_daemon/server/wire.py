@@ -24,7 +24,7 @@ def session_event(
 ) -> Wire:
     match event:
         case SessionStarted():
-            return "session_started", {
+            started: dict[str, object] = {
                 "session_id": session_id,
                 "client_id": client.client_id,
                 "client_label": client.label,
@@ -35,19 +35,23 @@ def session_event(
                 "started_at": event.started_at,
                 "previous_text": event.previous_text,
             }
+            if event.tracks is not None:
+                started["tracks"] = list(event.tracks)
+            return "session_started", started
         case PartialText():
-            return "partial", {"session_id": session_id, "text": event.text}
+            return "partial", _tracked({"session_id": session_id, "text": event.text}, event.track)
         case Progress():
             return "progress", {"session_id": session_id, "audio_seconds": event.audio_seconds}
         case Segment():
             return "segment", segment(event, session_id)
         case SessionError():
-            return "session_error", {
+            error: dict[str, object] = {
                 "session_id": session_id,
                 "code": event.code,
                 "message": event.message,
                 "fatal": event.fatal,
             }
+            return "session_error", _tracked(error, event.track)
         case SessionSuspended():
             by = event.by
             return "session_suspended", {
@@ -91,6 +95,8 @@ def vad_event(event: VadEvent, buffer_ms: int) -> Wire:
 
 def segment(seg: Segment, session_id: str) -> dict[str, object]:
     data: dict[str, object] = {"session_id": session_id, "index": seg.index, "text": seg.text}
+    if seg.track is not None:
+        data["track"] = seg.track
     if seg.language is not None:
         data["language"] = seg.language
     if seg.speaker is not None:
@@ -114,4 +120,10 @@ def _word(word: TimedWord) -> dict[str, object]:
     data: dict[str, object] = {"text": word.text, "start_ms": word.start_ms, "end_ms": word.end_ms}
     if word.speaker is not None:
         data["speaker"] = word.speaker
+    return data
+
+
+def _tracked(data: dict[str, object], track: str | None) -> dict[str, object]:
+    if track is not None:
+        data["track"] = track
     return data

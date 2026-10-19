@@ -6,9 +6,9 @@ from typing import Literal
 from .transcript import Segment
 
 type EndReason = Literal["stopped", "cancelled", "evicted", "client_gone", "error"]
-type SessionKind = Literal["mic", "transcribe"]
+type SessionKind = Literal["mic", "system", "transcribe"]
 
-KIND_RANK: dict[SessionKind, int] = {"mic": 0, "transcribe": 2}
+KIND_RANK: dict[SessionKind, int] = {"mic": 0, "system": 1, "transcribe": 2}
 """Lower ranks first: a dictation suspends the highest-ranked session in its way."""
 
 
@@ -21,11 +21,14 @@ class SessionStarted:
     """Epoch ms (UTC) of the session's first sample."""
     previous_text: str | None
     kind: SessionKind = "mic"
+    tracks: tuple[str, ...] | None = None
+    """Track names, for a session with named tracks (`system`)."""
 
 
 @dataclass(frozen=True)
 class PartialText:
     text: str
+    track: str | None = None
 
 
 @dataclass(frozen=True)
@@ -40,6 +43,7 @@ class SessionError:
     message: str
     fatal: bool
     """`SessionEnded` with reason "error" follows."""
+    track: str | None = None
 
 
 @dataclass(frozen=True)

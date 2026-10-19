@@ -1,7 +1,7 @@
 """Markers: waiting for a segment, then placed into its text between words."""
 
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 _TOKEN = re.compile(r"\S+")
@@ -41,13 +41,17 @@ class MarkerQueue:
     def add(self, marker: str, at_ms: int) -> None:
         self._pending.append(PendingMarker(marker, at_ms))
 
-    def take(self, until_ms: int | None = None) -> list[PendingMarker]:
-        """Those at or before `until_ms` (all when None); a segment's markers end at its span."""
-        if until_ms is None:
-            taken, self._pending = self._pending, []
-            return taken
-        taken = [m for m in self._pending if m.at_ms <= until_ms]
-        self._pending = [m for m in self._pending if m.at_ms > until_ms]
+    def take(
+        self, until_ms: int | None = None, *, also: Callable[[PendingMarker], bool] | None = None
+    ) -> list[PendingMarker]:
+        """Those at or before `until_ms` (all when None) for which `also` holds; a segment's
+        markers end at its span."""
+        taken: list[PendingMarker] = []
+        kept: list[PendingMarker] = []
+        for m in self._pending:
+            due = until_ms is None or m.at_ms <= until_ms
+            (taken if due and (also is None or also(m)) else kept).append(m)
+        self._pending = kept
         return taken
 
     def clear(self) -> None:

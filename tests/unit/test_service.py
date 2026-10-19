@@ -199,3 +199,25 @@ def test_check_tool_names_the_install_command_when_missing(
     assert check_tool("ffmpeg", lambda _name: None, "darwin") == (
         "ffmpeg is not installed or not on PATH. Install it: brew install ffmpeg"
     )
+
+
+@pytest.mark.parametrize(
+    ("os_release", "command"),
+    [
+        ("ID=debian\n", "sudo apt install pipewire-bin"),
+        ("ID=fedora\n", "sudo dnf install pipewire-utils"),
+        ("ID=arch\n", "sudo pacman -S pipewire"),
+        ('ID="opensuse-tumbleweed"\nID_LIKE="suse"\n', "sudo zypper install pipewire-tools"),
+    ],
+)
+def test_pw_record_hint_names_the_distro_package(
+    tmp_path: Path, os_release: str, command: str
+) -> None:
+    path = tmp_path / "os-release"
+    path.write_text(os_release)
+    assert install_hint("linux", path, package="pw-record") == command
+
+
+def test_pw_record_hint_without_a_known_distro_or_on_macos_names_the_tool(tmp_path: Path) -> None:
+    assert "pw-record" in install_hint("linux", tmp_path / "missing", package="pw-record")
+    assert "pw-record" in install_hint("darwin", package="pw-record")

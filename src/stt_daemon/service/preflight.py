@@ -38,10 +38,17 @@ _PACKAGES = {
         "zypper": "ffmpeg",
         "brew": "ffmpeg",
     },
+    "pw-record": {
+        "apt": "pipewire-bin",
+        "dnf": "pipewire-utils",
+        "pacman": "pipewire",
+        "zypper": "pipewire-tools",
+    },
 }
 _FALLBACK = {
     "portaudio": "PortAudio (libportaudio.so.2) from your distribution's packages",
     "ffmpeg": "ffmpeg from your distribution's packages",
+    "pw-record": "the PipeWire command-line tools (pw-record) from your distribution's packages",
 }
 
 
@@ -82,8 +89,12 @@ def install_hint(
     package: str = "portaudio",
 ) -> str:
     platform = sys.platform if platform is None else platform
-    packages = _PACKAGES[package]
+    packages = _PACKAGES.get(package)
+    if packages is None:
+        return f"{package} from your distribution's packages"
     if platform == "darwin":
+        if "brew" not in packages:
+            return _FALLBACK[package]
         return f"{_COMMANDS['brew']} {packages['brew']}"
     for distro in _distro_ids(os_release):
         if manager := _MANAGERS.get(distro):

@@ -65,6 +65,12 @@ class TranscribeRequest:
 
 
 @dataclass(frozen=True)
+class SystemRequest:
+    start: StartRequest
+    with_mic: bool = False
+
+
+@dataclass(frozen=True)
 class MarkerRequest:
     marker: str
     at: int | None
@@ -169,6 +175,16 @@ def parse_transcribe(data: Mapping[str, Any]) -> TranscribeRequest:
     if not _int_in(channels, 1, 2):
         raise RequestError("bad_request", "pcm.channels must be 1 or 2", field="pcm")
     return TranscribeRequest(start, (cast(int, rate), cast(int, channels)))
+
+
+def parse_system(data: Mapping[str, Any]) -> SystemRequest:
+    if "speech_id" in data:
+        raise RequestError(
+            "bad_request",
+            "start_system_session takes no speech_id; it starts at the command",
+            field="speech_id",
+        )
+    return SystemRequest(parse_start(data), _Fields(data, "bad_request").flag("with_mic"))
 
 
 def parse_audio(data: Mapping[str, Any]) -> bytes:

@@ -2,11 +2,13 @@
 
 import base64
 import itertools
+import sys
 from pathlib import Path
 
 import pytest
-from harness import Harness, Msg
+from harness import FIXTURE, Harness, Msg
 
+from stt_daemon.audio.pw_capture import PwRecordCapture
 from stt_daemon.audio.wav_capture import WavCapture
 from stt_daemon.backends.install import is_installed
 from stt_daemon.backends.parakeet import (
@@ -20,6 +22,7 @@ from stt_daemon.config import ParakeetConfig
 
 MODEL = model_dir()
 JARGON = Path(__file__).parents[1] / "fixtures" / "jargon.wav"
+FAKE_PW_RECORD = Path(__file__).parents[1] / "fake_pw_record.py"
 """18.7 s, three phrases; speech above -40 dBFS at 1.08-5.19, 7.24-10.98, 13.39-16.73 s:
 "Restart the stt-daemon, then open kitty and check the Huion tablet."
 "Scribbly sends pen marks while Talkey holds the push to talk key."
@@ -101,3 +104,43 @@ async def test_a_file_through_transcribe_gets_word_times_in_file_time(daemon: Ha
     assert "routes the mic" in spoken[2]["text"]
     for segment, edge_ms in zip(spoken, PHRASE_STARTS_MS, strict=True):
         assert abs(segment["words"][0]["start_ms"] - edge_ms) <= 200, (segment["words"][0], edge_ms)
+
+
+async def test_a_system_session_decodes_both_tracks_on_one_model(daemon: Harness) -> None:
+    loaded: list[RecognizerKey] = []
+
+    def loader(key: RecognizerKey) -> object:
+        loaded.append(key)
+        return load_recognizer(key)
+
+    backend = ParakeetBackend(ParakeetConfig(), MODEL, Engine(loader))
+    mic = WavCapture()
+    await daemon.start(
+        capture=mic,
+        backends={"parakeet": backend},
+        system_capture=lambda: PwRecordCapture(
+            [sys.executable, str(FAKE_PW_RECORD), "--wav", str(FIXTURE)]
+        ),
+    )
+    client, _ = await daemon.connect("Scribbly")
+    started = await client.request(
+        "start_system_session", {"with_mic": True, "word_timestamps": True}
+    )
+    assert started["type"] == "session_started", started
+    mic.play(JARGON)
+
+    def spoken(track: str) -> list[Msg]:
+        return [
+            m["data"]
+            for m in client.of_type("segment")
+            if m["data"]["track"] == track and m["data"]["text"]
+        ]
+
+    await client.wait(lambda _m: len(spoken("system")) == 2 and len(spoken("mic")) == 2, 25.0)
+    stopped = await client.request("stop_session")
+    assert stopped["data"]["reason"] == "stopped", stopped
+    assert len(loaded) == 1
+    assert "tablet" in spoken("mic")[0]["text"]
+    assert "pen marks" in spoken("mic")[1]["text"]
+    lines = stopped["data"]["final_text"].splitlines()
+    assert {line.split(" ", 1)[0] for line in lines} == {"[system]", "[mic]"}

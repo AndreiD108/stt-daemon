@@ -153,7 +153,10 @@ def test_a_file_backend_takes_transcribe_sessions_only_and_is_never_the_default(
     assert setup.default == "b1"
     assert setup_of(FakeBackend(), FilesFake(), default="b1").default == "b0"
     assert refused(setup, backend="b0").code == "unsupported"
-    assert [b["kinds"] for b in setup.backends_wire()] == [["transcribe"], ["mic", "transcribe"]]
+    assert [b["kinds"] for b in setup.backends_wire()] == [
+        ["transcribe"],
+        ["mic", "system", "transcribe"],
+    ]
 
 
 def test_diarize_on_a_backend_without_it_is_an_unsupported_option() -> None:

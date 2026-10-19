@@ -11,41 +11,35 @@ import logging
 import os
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 
 from .. import __version__
-from ..audio.capture import CaptureSource, CaptureUnavailable
-from ..audio.stream_capture import ByteStreamCapture, ToolMissing, ffmpeg_command
+from ..audio.capture import CaptureSource
+from ..audio.pw_capture import PwRecordCapture
 from ..audio.vad import VadEvent
-from ..backends.base import FileBackend, OpenFailed
 from ..config import ConfigError
 from ..credentials import CredentialsError
-from ..service.preflight import check_tool
 from ..session.context import ContextStore, scope_of
 from ..session.events import SessionEnded, SessionEvent, SessionStarted
 from ..session.options import MarkerRefused
-from ..session.session import Session
-from ..session.upload import UploadSession
 from . import wire
-from .backend_set import Setup, resolve
+from .backend_set import Setup
 from .connection import LINE_LIMIT, Connection, prepare_socket, put_until_gone, readline
 from .messages import (
     PROTOCOL,
     Message,
-    MessageId,
     RequestError,
     parse_audio,
     parse_hello,
     parse_line,
     parse_marker,
-    parse_start,
-    parse_transcribe,
 )
 from .peer import peer_of
-from .slot import AnySession, ClientGone, Slot
-from .slot_state import Client, SlotState, StartRefused
+from .slot import Slot
+from .slot_state import Client, SlotState
 from .speech import SpeechWatch
+from .starts import Running, Starts
 
 log = logging.getLogger(__name__)
 
@@ -54,23 +48,10 @@ COMMAND_QUEUE = 16
 _CLOSE_TIMEOUT_S = 2.0
 
 
-@dataclass(eq=False)
-class _Running:
-    conn: Connection
-    session: AnySession
-    session_label: str | None
-    context_key: str | None
-    start_id: MessageId | None
-    end_id: MessageId | None = None
-    """The `stop_session` or `cancel_session` that `session_ended` replies to."""
-    stream: ByteStreamCapture | UploadSession | None = None
-    """A `transcribe` session's input."""
-
-
 type _Item = tuple[Message | RequestError, float]
 
 
-class Server:
+class Server(Starts):
     def __init__(
         self,
         *,
@@ -78,17 +59,20 @@ class Server:
         capture: CaptureSource,
         setup: Setup,
         reload_setup: Callable[[], Setup],
+        system_capture: Callable[[], PwRecordCapture] = PwRecordCapture,
     ) -> None:
         """`reload_setup` re-reads config and credentials; it raises `ConfigError` or
-        `CredentialsError`. Construct on the loop."""
+        `CredentialsError`. `system_capture` makes a `system` session's system track. Construct
+        on the loop."""
         self.path = path
         self.capture = capture
         self.setup = setup
         self._reload_setup = reload_setup
+        self._system_capture = system_capture
         self._connections: set[Connection] = set()
         self._welcomed: dict[str, Connection] = {}
         self._handlers: set[asyncio.Task[None]] = set()
-        self._running: dict[str, _Running] = {}
+        self._running: dict[str, Running] = {}
         self._contexts = ContextStore()
         self._ids = itertools.count(1)
         self._server: asyncio.Server | None = None
@@ -256,6 +240,8 @@ class Server:
                 await self._start(conn, message, arrived)
             case "transcribe":
                 await self._transcribe(conn, message)
+            case "start_system_session":
+                await self._system(conn, message)
             case "audio":
                 await self._audio(conn, message)
             case "add_marker":
@@ -268,116 +254,6 @@ class Server:
                 raise RequestError("bad_request", "hello was already sent on this connection")
             case kind:
                 raise RequestError("bad_request", f"unknown message type {kind!r}")
-
-    async def _start(self, conn: Connection, message: Message, arrived: float) -> None:
-        request = parse_start(message.data)
-        setup = self.setup
-        since = None
-        if request.speech_id is not None:
-            speech_start = self._speech.start_of(request.speech_id)
-            if speech_start is None:
-                raise RequestError(
-                    "speech_expired",
-                    f"speech {request.speech_id} is unknown or left the audio buffer; "
-                    "start without speech_id",
-                )
-            since = speech_start - setup.config.vad.pause_keep_ms / 1000
-        cid = conn.client.client_id
-        scope = scope_of(cid, conn.client.label)
-
-        def make_session(emit: Callable[[SessionEvent], None]) -> Session:
-            resolved = resolve(setup, request, lambda key: self._contexts.get(scope, key))
-            session = Session(
-                config=setup.config,
-                capture=self.capture,
-                backend=resolved.backend,
-                options=resolved.options,
-                emit=emit,
-            )
-            self._running[cid] = _Running(
-                conn, session, request.label, resolved.context_key, message.id
-            )
-            return session
-
-        try:
-            await self._slot.start(
-                conn.client,
-                make_session=make_session,
-                session_label=request.label,
-                since=since,
-                requested_at=arrived,
-            )
-        except StartRefused as exc:
-            raise _refused(exc) from None
-        except ClientGone:
-            pass
-        except CaptureUnavailable as exc:
-            raise RequestError(
-                "mic_unavailable", f"{exc}; check the mic, then start again"
-            ) from None
-        except OpenFailed as exc:
-            raise RequestError(exc.code, exc.message) from None
-        finally:
-            run = self._running.get(cid)
-            if run is not None and run.session.started is None:
-                del self._running[cid]
-
-    async def _transcribe(self, conn: Connection, message: Message) -> None:
-        request = parse_transcribe(message.data)
-        setup = self.setup
-        decoder = None if request.pcm == (16000, 1) else ffmpeg_command(request.pcm)
-        cid = conn.client.client_id
-        scope = scope_of(cid, conn.client.label)
-
-        def make_session(emit: Callable[[SessionEvent], None]) -> AnySession:
-            resolved = resolve(
-                setup, request.start, lambda key: self._contexts.get(scope, key), kind="transcribe"
-            )
-            if isinstance(resolved.backend, FileBackend):
-                upload = UploadSession(
-                    backend=resolved.backend,
-                    options=resolved.options,
-                    pcm=request.pcm,
-                    emit=emit,
-                    drain=conn.drain,
-                )
-                self._running[cid] = _Running(
-                    conn, upload, request.start.label, None, message.id, stream=upload
-                )
-                return upload
-            if decoder is not None and (problem := check_tool("ffmpeg")) is not None:
-                raise RequestError("tool_unavailable", problem, tool="ffmpeg")
-            stream = ByteStreamCapture(decoder)
-            session = Session(
-                config=setup.config,
-                capture=stream,
-                backend=resolved.backend,
-                options=resolved.options,
-                emit=emit,
-                kind="transcribe",
-            )
-            self._running[cid] = _Running(
-                conn, session, request.start.label, resolved.context_key, message.id, stream=stream
-            )
-            return session
-
-        try:
-            await self._slot.start_input(
-                conn.client, make_session=make_session, session_label=request.start.label
-            )
-        except StartRefused as exc:
-            raise _refused(exc) from None
-        except ClientGone:
-            pass
-        except ToolMissing as exc:
-            problem = check_tool(str(exc)) or f"{exc} could not be started"
-            raise RequestError("tool_unavailable", problem, tool=str(exc)) from None
-        except OpenFailed as exc:
-            raise RequestError(exc.code, exc.message) from None
-        finally:
-            run = self._running.get(cid)
-            if run is not None and run.session.started is None:
-                del self._running[cid]
 
     async def _audio(self, conn: Connection, message: Message) -> None:
         data = parse_audio(message.data)
@@ -482,19 +358,9 @@ class Server:
             if wanted:
                 conn.send(kind, data)
 
-    def _remember(self, client: Client, run: _Running, ended: SessionEnded) -> None:
+    def _remember(self, client: Client, run: Running, ended: SessionEnded) -> None:
         if run.context_key is None or ended.reason not in ("stopped", "evicted"):
             return
         if ended.plain_text.strip():
             scope = scope_of(client.client_id, client.label)
             self._contexts.put(scope, run.context_key, ended.plain_text)
-
-
-def _refused(exc: StartRefused) -> RequestError:
-    if exc.full_slot == "mic":
-        next_step = "wait for a slot event with state idle or evictable"
-    elif exc.full_slot == "backend":
-        next_step = f"wait for a slot event with room on {exc.backend}, or use another backend"
-    else:
-        next_step = "stop it first"
-    return RequestError(exc.code, f"{exc.message}; {next_step}", **exc.to_wire())

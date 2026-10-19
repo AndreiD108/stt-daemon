@@ -78,7 +78,9 @@ def load_setup(
 
 def kinds_of(backend: Backend) -> tuple[SessionKind, ...]:
     """The session kinds the backend takes."""
-    return ("transcribe",) if isinstance(backend, FileBackend) else ("mic", "transcribe")
+    if isinstance(backend, FileBackend):
+        return ("transcribe",)
+    return ("mic", "system", "transcribe")
 
 
 @dataclass(frozen=True)
