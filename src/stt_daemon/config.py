@@ -73,6 +73,15 @@ class ElevenLabsConfig:
     max_sessions: int = DEFAULT_MAX_SESSIONS
 
 
+@dataclass
+class ElevenLabsBatchConfig:
+    """`language` and `keyterms` come from `[backends.elevenlabs]`."""
+
+    model_id: str = "scribe_v2"
+    endpoint: str = "https://api.elevenlabs.io/v1/speech-to-text"
+    max_sessions: int = DEFAULT_MAX_SESSIONS
+
+
 def default_num_threads() -> int:
     """Leaves two cores to the rest of the machine; at most 4."""
     return min(4, max(1, (os.cpu_count() or 1) - 2))
@@ -95,6 +104,9 @@ class ParakeetConfig:
 class BackendsConfig:
     default: str | None = None
     elevenlabs: ElevenLabsConfig = field(default_factory=ElevenLabsConfig)
+    elevenlabs_batch: ElevenLabsBatchConfig = field(
+        default_factory=ElevenLabsBatchConfig, metadata={"key": "elevenlabs-batch"}
+    )
     parakeet: ParakeetConfig = field(default_factory=ParakeetConfig)
 
 
@@ -164,14 +176,14 @@ def load_config(path: Path | None = None) -> Config:
 
 def _build[T: DataclassInstance](cls: type[T], raw: dict[str, Any], prefix: str, path: Path) -> T:
     hints = typing.get_type_hints(cls)
-    names = {f.name for f in dataclasses.fields(cls)}
+    keys = {f.metadata.get("key", f.name): f.name for f in dataclasses.fields(cls)}
     for key in raw:
-        if key not in names:
+        if key not in keys:
             log.warning("%s: unknown key %s%s, ignored", path, prefix, key)
     values = {
-        name: _convert(hints[name], raw[name], f"{prefix}{name}", path)
-        for name in names
-        if name in raw
+        name: _convert(hints[name], raw[key], f"{prefix}{key}", path)
+        for key, name in keys.items()
+        if key in raw
     }
     return cls(**values)
 
@@ -237,6 +249,7 @@ def _validate(config: Config, path: Path) -> None:
     check(parakeet.unload_after_minutes >= 0, "backends.parakeet.unload_after_minutes", "0 or more")
     for name, section in (
         ("elevenlabs", config.backends.elevenlabs),
+        ("elevenlabs-batch", config.backends.elevenlabs_batch),
         ("parakeet", config.backends.parakeet),
     ):
         check(section.max_sessions >= 1, f"backends.{name}.max_sessions", "1 or more")

@@ -12,6 +12,7 @@ class TimedWord:
     text: str
     start_ms: int
     end_ms: int
+    speaker: str | None = None
 
 
 @dataclass(frozen=True)

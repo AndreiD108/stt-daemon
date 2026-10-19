@@ -37,7 +37,7 @@ def transcribe(backend: FakeBackend) -> Callable[[Emit], Session]:
 
 def session(h: Harness, client: Client) -> Session:
     s = h.slot.session_of(client.client_id)
-    assert s is not None
+    assert isinstance(s, Session)
     return s
 
 

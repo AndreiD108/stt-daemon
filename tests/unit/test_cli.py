@@ -101,6 +101,15 @@ def test_set_default_refuses_a_backend_that_is_not_set_up(
     assert not (home / "config.toml").exists()
 
 
+def test_set_default_refuses_the_batch_backend(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_key("elevenlabs", "sk-abc123")
+    assert main(["backend", "set-default", "elevenlabs-batch"]) == 1
+    assert "transcribe sessions only" in capsys.readouterr().err
+    assert not (home / "config.toml").exists()
+
+
 def _fake_install(monkeypatch: pytest.MonkeyPatch) -> None:
     def install() -> tuple[Path, bool]:
         model = model_dir()

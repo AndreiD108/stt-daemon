@@ -17,6 +17,8 @@ class Segment:
     words: tuple[TimedWord, ...] | None
     """None when the client didn't ask for word times; then `after_word` isn't sent either."""
     markers: tuple[PlacedMarker, ...]
+    speaker: str | None = None
+    """Set when the backend named one speaker for all its words."""
 
 
 class Transcript:
@@ -33,12 +35,13 @@ class Transcript:
         span: tuple[int, int],
         words: tuple[TimedWord, ...] | None,
         markers: tuple[PlacedMarker, ...],
+        speaker: str | None = None,
     ) -> Segment | None:
         """The new segment; None when it has neither text nor markers. `plain` is `text`
         without markers."""
         if not text.strip() and not markers:
             return None
-        segment = Segment(len(self.segments), text, language, *span, words, markers)
+        segment = Segment(len(self.segments), text, language, *span, words, markers, speaker)
         self.segments.append(segment)
         self._plain.append(plain)
         return segment

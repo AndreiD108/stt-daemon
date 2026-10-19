@@ -14,6 +14,8 @@ Sessions come in two kinds:
   ffmpeg reads, or raw PCM. It takes one backend slot and no mic slot, so it runs next to a mic
   session and is never evictable. It runs as fast as the audio arrives.
 
+A backend takes the kinds in its `kinds` in `welcome`. `elevenlabs-batch` takes `transcribe` only.
+
 Dictation comes first. When a `start_session` finds its backend full and a session of another kind
 holds a slot there, the daemon suspends that session instead of refusing the start: of the lowest
 kind, the most recently started. A suspended session loses nothing. It drops its backend
@@ -124,9 +126,13 @@ All fields optional.
 - `word_timestamps`: put `words` on `segment` events, and `after_word` on their `markers`.
   Default false.
 
+- `diarize`, `num_speakers`: as for [`transcribe`](#transcribe). No backend that takes `mic`
+  sessions has `diarize`, so `diarize: true` here fails with `unsupported_option`.
+
 Hints (`keyterms`, `previous_text`, `context_key`) are dropped when the backend can't use them; the
 backend's entry in `welcome` says which it takes. Features (`partials`, `word_timestamps`) fail the
-start with `unsupported` when the backend lacks them.
+start with `unsupported` when the backend lacks them; so does a backend whose `kinds` lacks the
+session's kind.
 
 Checks run in this order, before either slot changes: field types (`bad_request`), `speech_id`
 (`speech_expired`), the mic slot (`session_active`, `busy`), the backend, language and features,
@@ -166,6 +172,12 @@ with `stop_session`. All fields optional. `label`, `backend`, `language`, `keyte
 `previous_text`, `context_key`, `partials` and `word_timestamps` work as for `start_session`;
 `speech_id` is refused (`bad_request`).
 
+- `backend`: default `default_backend`, except that a default of `elevenlabs` gives
+  `elevenlabs-batch` when it is set up (it is whenever `elevenlabs` is).
+- `diarize` (default false): tell speakers apart; words and segments get `speaker`. Only on a
+  backend with `diarize: true` in `welcome`, else `unsupported_option` (`field: "diarize"`).
+- `num_speakers` (1–32): the most speakers the audio has. Only with `diarize: true`, else
+  `bad_request` (`field: "num_speakers"`).
 - `pcm`: the bytes are raw PCM, s16le, at `rate` (8000–192000) with `channels` (1 or 2). Raw PCM
   has no header, so without `pcm` the bytes must be a file in a format ffmpeg reads (wav, mp3,
   m4a, ogg, webm, mp4, …); ffmpeg decides, the daemon does not look at the bytes.
@@ -188,6 +200,23 @@ stops like any session that is behind: the daemon stops reading the connection, 
 after that `audio`, `stop_session` and `cancel_session` included, wait for the resume. To drop a
 suspended session at once, disconnect. Suspended time doesn't count as the backend answering
 nothing.
+
+On `elevenlabs-batch` the session works another way. The daemon keeps the bytes as sent, with no
+ffmpeg and no decoding, and uploads them in one request at `stop_session`; ElevenLabs reads the
+container itself. Raw `pcm` goes as it is at 16 kHz mono, else with a WAV header for its rate and
+channels. So:
+
+- The session commits only at the stop and is never suspended. It sends neither `partial` nor
+  `progress` events, and its start never fails with `tool_unavailable`.
+- At the stop, all the text comes at once, as segments of 20 to 30 s (cut at a sentence end where
+  there is one) and, with `diarize`, at each speaker change. The daemon sends them as fast as the
+  client reads, then `session_ended`. The stop waits for the answer however long it takes (the
+  daemon gives up after 10 minutes with no answer, with `network`).
+- `add_marker` needs `at`, since the audio's length is known only from the answer.
+- `duration_ms` in `session_ended` is the end of the last word, not the file's length.
+- The input may be at most 256 MiB; more ends the session with a fatal `invalid_request`.
+- A failed upload is tried once more after 2 s on a `network` or `backend_error`; any other
+  failure, or a second one, ends the session with a fatal `session_error`.
 
 Reply: `session_started` (`kind: "transcribe"`), or `error` with one of the start codes.
 
@@ -310,7 +339,9 @@ sent during a slow start waits for the start; a `ping` doesn't).
       "languages": ["auto", "en", "ro"],
       "word_timestamps": true,
       "partials": true,
-      "hints": ["keyterms", "previous_text"]
+      "hints": ["keyterms", "previous_text"],
+      "diarize": false,
+      "kinds": ["mic", "transcribe"]
     }
   ],
   "default_backend": "elevenlabs",
@@ -320,10 +351,14 @@ sent during a slow start waits for the start; a `ping` doesn't).
 ```
 
 - `backends` lists only the backends set up on this machine; empty when none is. Today:
-  `elevenlabs` (an API key is set) and `parakeet` (local model installed; `languages: ["auto"]`,
-  `partials: false`, `hints: ["keyterms"]`).
+  `elevenlabs` and `elevenlabs-batch` (an API key is set; the batch one has `partials: false`,
+  `hints: ["keyterms"]`, `diarize: true`, `kinds: ["transcribe"]`) and `parakeet` (local model
+  installed; `languages: ["auto"]`, `partials: false`, `hints: ["keyterms"]`).
+- `diarize`: the backend tells speakers apart (see [`transcribe`](#transcribe)).
+- `kinds`: the session kinds the backend takes.
 - `default_backend`: the user's global default, `null` when there is no backend; the first backend
-  set up, changed with `stt-daemon backend set-default <backend>`.
+  set up, changed with `stt-daemon backend set-default <backend>`. Never a backend that takes only
+  `transcribe` sessions.
 - `slot` has the `slot` event's shape. Unlike `slot` events, it can show a holder whose session is
   still starting (`since: null`), and that session in `backends`.
 - `mic_open`: the daemon keeps the mic open between sessions (config `audio.keep_mic_open`,
@@ -452,6 +487,9 @@ previous one; a `segment` replaces the partial. Only with `partials: true`.
   marker's time (from `at` or arrival).
 - `words`, and `after_word` on each marker: only with `word_timestamps: true`. `after_word` is
   the index in `words` of the word the marker follows, `-1` before the first.
+- `speaker` (on the segment and on each word, as `"speaker_0"`, `"speaker_1"`, …): only in a
+  session with `diarize: true`. Segments split where the speaker changes, so a segment has one;
+  missing when the backend named none.
 - When segments commit is up to the backend. Timed commits are checked every 5 s and need speech
   sent since the last commit, so they can cut mid-speech. ElevenLabs: 25 s after the last commit
   (ElevenLabs advises 20–30 s), before each connection rollover (about every 13 minutes), and at
@@ -558,7 +596,8 @@ Codes of `error` replies, and of `session_error` for the backend codes.
 | `no_backend` | `start_session`, `transcribe` | No backend set up; the message names `stt-daemon key set elevenlabs` and `stt-daemon backend install parakeet`. |
 | `unknown_backend` | `start_session`, `transcribe` | `backend` isn't set up here; pick one from `welcome.backends`. |
 | `unsupported_language` | `start_session`, `transcribe` | The backend lacks that language (or the config's default language). |
-| `unsupported` | `start_session`, `transcribe` | The backend lacks a requested feature. Start without it. |
+| `unsupported` | `start_session`, `transcribe` | The backend lacks a requested feature, or doesn't take this session kind (`elevenlabs-batch` with `start_session`). Start without the feature, or on another backend. |
+| `unsupported_option` | `start_session`, `transcribe` | The backend lacks an option; `field` names it (`diarize`). Send without it. |
 | `mic_unavailable` | `start_session` | The mic didn't open. |
 | `tool_unavailable` | `transcribe` | A program the daemon needs isn't installed; `tool` names it (`ffmpeg`), the message gives the install command. Raw 16 kHz mono `pcm` needs none. |
 | `no_session` | `add_marker`, `audio`, `stop_session`, `cancel_session` | No session, or it is already ending. |
@@ -576,7 +615,7 @@ the cause.
 | Code | Retried | Meaning |
 | --- | --- | --- |
 | `auth` | no | The API key was refused; the user sets a new one with `stt-daemon key set`. |
-| `quota` | no | The account is out of quota. |
+| `quota` | no | The account is out of quota (ElevenLabs HTTP 402). |
 | `invalid_request` | no | The backend rejected the request or the audio; for `transcribe`, also input ffmpeg can't decode. |
 | `model_error` | no | The local model didn't load; the message names the directory to delete before reinstalling. |
 | `concurrency_limit` | no | The provider refused one more connection: the account's concurrent sessions are in use. A `start_session` that gets it suspends a session of another kind on that backend, if there is one, and tries once more. |
@@ -586,7 +625,8 @@ the cause.
 | `session_limit`, `idle_drop` | yes | The backend ended a connection (time limit, no audio). |
 
 "Retried" means the daemon reconnects; it still gives up after 3 failed reconnects, with that
-code and `fatal: true`. Act on `fatal`, not on the code.
+code and `fatal: true`. Act on `fatal`, not on the code. For an HTTP failure, `message` starts
+with the status and holds the provider's own text, as in `ElevenLabs HTTP 402: …`.
 
 ## VAD events
 

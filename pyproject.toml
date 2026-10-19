@@ -9,6 +9,7 @@ license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
+    "httpx>=0.28.1",
     "numpy>=2.5.4",
     "sherpa-onnx==1.13.8",
     # Linux wheels need -core (onnxruntime), but uv reads sherpa-onnx's deps from wheels that omit it

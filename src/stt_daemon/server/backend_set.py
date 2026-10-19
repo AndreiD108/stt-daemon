@@ -5,9 +5,10 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from ..backends import BACKENDS
-from ..backends.base import Backend, BackendUnavailable, OpenOptions
+from ..backends.base import Backend, BackendUnavailable, FileBackend, OpenOptions
 from ..config import Config
 from ..credentials import Credentials
+from ..session.events import SessionKind
 from ..session.options import SessionOptions
 from .messages import RequestError, StartRequest
 
@@ -46,6 +47,8 @@ class Setup:
                 "word_timestamps": b.capabilities.word_timestamps,
                 "partials": b.capabilities.partials,
                 "hints": sorted(b.capabilities.hints),
+                "diarize": b.capabilities.diarize,
+                "kinds": list(kinds_of(b)),
             }
             for name, b in self.backends.items()
         ]
@@ -62,11 +65,20 @@ def load_setup(
         except BackendUnavailable as exc:
             unavailable[name] = exc.message
     default = config.backends.default
-    if default not in backends:
-        if default is not None:
-            log.warning("default backend %s is not set up; using the first one set up", default)
-        default = next(iter(backends), None)
+    if default in backends and isinstance(backends[default], FileBackend):
+        log.warning("default backend %s takes transcribe sessions only; ignoring it", default)
+        default = None
+    elif default is not None and default not in backends:
+        log.warning("default backend %s is not set up; using the first one set up", default)
+        default = None
+    if default is None:
+        default = next((n for n, b in backends.items() if not isinstance(b, FileBackend)), None)
     return Setup(config, backends, unavailable, default)
+
+
+def kinds_of(backend: Backend) -> tuple[SessionKind, ...]:
+    """The session kinds the backend takes."""
+    return ("transcribe",) if isinstance(backend, FileBackend) else ("mic", "transcribe")
 
 
 @dataclass(frozen=True)
@@ -77,11 +89,28 @@ class Resolved:
     """None when the request had none or the backend takes no `previous_text`."""
 
 
-def resolve(setup: Setup, req: StartRequest, lookup: Callable[[str], str | None]) -> Resolved:
+def resolve(
+    setup: Setup,
+    req: StartRequest,
+    lookup: Callable[[str], str | None],
+    *,
+    kind: SessionKind = "mic",
+) -> Resolved:
     """Checks the request; `lookup` gives the stored text for a `context_key`."""
-    backend = _backend(setup, req.backend)
+    backend = _backend(setup, req.backend, kind)
     caps = backend.capabilities
     name = backend.name
+    if kind not in kinds_of(backend):
+        raise RequestError(
+            "unsupported",
+            f"{name} takes transcribe sessions only; use another backend for {kind} sessions",
+        )
+    if req.diarize and not caps.diarize:
+        raise RequestError(
+            "unsupported_option",
+            f"{name} can't tell speakers apart; send without diarize and num_speakers",
+            field="diarize",
+        )
     if req.partials and not caps.partials:
         raise RequestError("unsupported", f"{name} has no partials; start without partials")
     if req.word_timestamps and not caps.word_timestamps:
@@ -96,18 +125,32 @@ def resolve(setup: Setup, req: StartRequest, lookup: Callable[[str], str | None]
         if previous_text is None and context_key is not None:
             previous_text = lookup(context_key)
     open_options = OpenOptions(
-        language=language, keyterms=keyterms, previous_text=previous_text, partials=req.partials
+        language=language,
+        keyterms=keyterms,
+        previous_text=previous_text,
+        partials=req.partials,
+        diarize=req.diarize,
+        num_speakers=req.num_speakers,
     )
     return Resolved(
         backend, SessionOptions(open_options, word_timestamps=req.word_timestamps), context_key
     )
 
 
-def _backend(setup: Setup, requested: str | None) -> Backend:
-    if not setup.backends:
+def _backend(setup: Setup, requested: str | None, kind: SessionKind) -> Backend:
+    if not setup.backends or (requested is None and setup.default is None):
         raise RequestError("no_backend", NO_BACKEND)
     name = requested or setup.default
     assert name is not None
+    if requested is None and kind == "transcribe":
+        name = next(
+            (
+                n
+                for n, b in setup.backends.items()
+                if isinstance(b, FileBackend) and b.default_for == name
+            ),
+            name,
+        )
     if (backend := setup.backends.get(name)) is not None:
         return backend
     ready = ", ".join(setup.backends)

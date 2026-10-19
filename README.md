@@ -47,6 +47,9 @@ socket and ask for a session; one session runs at a time. Two backends:
 - **ElevenLabs Scribe v2 Realtime**, in the cloud. Needs an API key.
 - **Parakeet TDT 0.6B v3**, local. Runs on the CPU.
 
+Files also go to **ElevenLabs Scribe v2** as one upload (`elevenlabs-batch`, same key), which can
+tell speakers apart.
+
 ![The same sentence through ElevenLabs in the cloud and through Parakeet on the CPU](docs/media/backends.gif)
 
 ## Install
@@ -82,10 +85,13 @@ Speak, press Enter, and read what the daemon heard.
 ```sh
 stt-daemon transcribe talk.m4a notes.mp3           # the text of each, a blank line between
 stt-daemon transcribe --json --backend parakeet talk.m4a   # text, words and segments as JSON
+stt-daemon transcribe --diarize --speakers 2 interview.mp3   # each line starts with its speaker
 ```
 
-Anything ffmpeg reads works: audio or video. The file goes through the daemon as fast as the
-backend takes it, and word times count from the start of the file. It needs `ffmpeg` on your PATH.
+With `elevenlabs` as the default, files go to `elevenlabs-batch`: the daemon uploads the file as
+it is and prints the text when ElevenLabs answers. On Parakeet, the file goes through the daemon
+as fast as the model takes it, and `ffmpeg` must be on your PATH; anything ffmpeg reads works,
+audio or video. Either way, word times count from the start of the file.
 
 ## Update
 

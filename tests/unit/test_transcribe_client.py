@@ -66,6 +66,8 @@ class FakeDaemon:
                 text = f"got {len(audio)} bytes"
                 word = {"text": text, "start_ms": 100, "end_ms": 900}
                 segment = {"session_id": "x", "index": 0, "text": text, "start_ms": 0}
+                if self.starts[-1].get("diarize"):
+                    segment["speaker"] = "speaker_0"
                 send("segment", {**segment, "end_ms": 1000, "words": [word]})
                 send(
                     "session_ended",
@@ -107,6 +109,16 @@ async def test_each_file_streams_whole_and_prints_its_text(
     assert out == f"got {CHUNK_BYTES * 2 + 5} bytes\n\ngot 10 bytes\n"
     assert fake_daemon.received == [p.read_bytes() for p in paths]
     assert fake_daemon.starts[0] == {"word_timestamps": True, "backend": "fake", "language": "ro"}
+
+
+async def test_diarize_asks_for_speakers_and_names_them_per_segment(
+    fake_daemon: FakeDaemon, tmp_path: Path
+) -> None:
+    code, out, _ = await run(fake_daemon, files(tmp_path, 3), diarize=True, num_speakers=2)
+    assert code == 0
+    assert out == "speaker_0: got 3 bytes\n"
+    assert fake_daemon.starts[0]["diarize"] is True
+    assert fake_daemon.starts[0]["num_speakers"] == 2
 
 
 async def test_json_prints_one_object_per_file(fake_daemon: FakeDaemon, tmp_path: Path) -> None:

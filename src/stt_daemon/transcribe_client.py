@@ -21,6 +21,8 @@ class TranscribeOptions:
     backend: str | None = None
     language: str | None = None
     json: bool = False
+    diarize: bool = False
+    num_speakers: int | None = None
 
 
 class TranscribeFailed(Exception):
@@ -54,7 +56,7 @@ async def transcribe(
             else:
                 if i:
                     print(file=out)
-                print(result["text"], file=out)
+                print(_text(result, options.diarize), file=out)
             out.flush()
         return 0
     except TranscribeFailed as exc:
@@ -62,6 +64,14 @@ async def transcribe(
         return 1
     finally:
         client.close()
+
+
+def _text(result: Msg, by_speaker: bool) -> str:
+    """With `by_speaker`, a line per segment that names its speaker."""
+    segments: list[Msg] = result["segments"]
+    if not by_speaker or not any("speaker" in s for s in segments):
+        return result["text"]
+    return "\n".join(f"{s.get('speaker', '?')}: {s['text'].strip()}" for s in segments)
 
 
 class _Client:
@@ -92,6 +102,10 @@ class _Client:
                 start["backend"] = options.backend
             if options.language:
                 start["language"] = options.language
+            if options.diarize:
+                start["diarize"] = True
+            if options.num_speakers is not None:
+                start["num_speakers"] = options.num_speakers
             await self._request("transcribe", start)
             ended: asyncio.Future[Msg] = asyncio.get_running_loop().create_future()
             sending = asyncio.create_task(self._send_file(stream, ended))

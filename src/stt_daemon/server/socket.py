@@ -18,7 +18,7 @@ from .. import __version__
 from ..audio.capture import CaptureSource, CaptureUnavailable
 from ..audio.stream_capture import ByteStreamCapture, ToolMissing, ffmpeg_command
 from ..audio.vad import VadEvent
-from ..backends.base import OpenFailed
+from ..backends.base import FileBackend, OpenFailed
 from ..config import ConfigError
 from ..credentials import CredentialsError
 from ..service.preflight import check_tool
@@ -26,6 +26,7 @@ from ..session.context import ContextStore, scope_of
 from ..session.events import SessionEnded, SessionEvent, SessionStarted
 from ..session.options import MarkerRefused
 from ..session.session import Session
+from ..session.upload import UploadSession
 from . import wire
 from .backend_set import Setup, resolve
 from .connection import LINE_LIMIT, Connection, prepare_socket, put_until_gone, readline
@@ -42,7 +43,7 @@ from .messages import (
     parse_transcribe,
 )
 from .peer import peer_of
-from .slot import ClientGone, Slot
+from .slot import AnySession, ClientGone, Slot
 from .slot_state import Client, SlotState, StartRefused
 from .speech import SpeechWatch
 
@@ -56,13 +57,13 @@ _CLOSE_TIMEOUT_S = 2.0
 @dataclass(eq=False)
 class _Running:
     conn: Connection
-    session: Session
+    session: AnySession
     session_label: str | None
     context_key: str | None
     start_id: MessageId | None
     end_id: MessageId | None = None
     """The `stop_session` or `cancel_session` that `session_ended` replies to."""
-    stream: ByteStreamCapture | None = None
+    stream: ByteStreamCapture | UploadSession | None = None
     """A `transcribe` session's input."""
 
 
@@ -328,8 +329,22 @@ class Server:
         cid = conn.client.client_id
         scope = scope_of(cid, conn.client.label)
 
-        def make_session(emit: Callable[[SessionEvent], None]) -> Session:
-            resolved = resolve(setup, request.start, lambda key: self._contexts.get(scope, key))
+        def make_session(emit: Callable[[SessionEvent], None]) -> AnySession:
+            resolved = resolve(
+                setup, request.start, lambda key: self._contexts.get(scope, key), kind="transcribe"
+            )
+            if isinstance(resolved.backend, FileBackend):
+                upload = UploadSession(
+                    backend=resolved.backend,
+                    options=resolved.options,
+                    pcm=request.pcm,
+                    emit=emit,
+                    drain=conn.drain,
+                )
+                self._running[cid] = _Running(
+                    conn, upload, request.start.label, None, message.id, stream=upload
+                )
+                return upload
             if decoder is not None and (problem := check_tool("ffmpeg")) is not None:
                 raise RequestError("tool_unavailable", problem, tool="ffmpeg")
             stream = ByteStreamCapture(decoder)

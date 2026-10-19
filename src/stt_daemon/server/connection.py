@@ -19,6 +19,8 @@ LINE_LIMIT = 2 << 20
 WRITE_BUFFER_LIMIT = 8 << 20
 """A client that lets this much pile up unread is closed."""
 HANGUP_CHECK_S = 0.5
+DRAIN_WAIT_S = 30.0
+"""After this, sending goes on and `WRITE_BUFFER_LIMIT` decides."""
 
 
 class SocketInUse(Exception):
@@ -45,6 +47,16 @@ class Connection:
             log.warning("client %s reads too slowly; closing it", self.client.client_id)
             self.closed = True
             transport.abort()
+
+    async def drain(self) -> None:
+        """Waits, at most `DRAIN_WAIT_S`, until the client has read most of what was sent."""
+        if self.closed or self.writer.transport.is_closing():
+            return
+        try:
+            async with asyncio.timeout(DRAIN_WAIT_S):
+                await self.writer.drain()
+        except (ConnectionError, TimeoutError):
+            pass
 
     def hung_up(self) -> bool:
         sock = self.writer.get_extra_info("socket")

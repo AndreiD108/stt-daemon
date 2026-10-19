@@ -53,6 +53,8 @@ async def test_welcome_describes_the_daemon(daemon: Harness) -> None:
             "word_timestamps": True,
             "partials": True,
             "hints": ["keyterms", "previous_text"],
+            "diarize": False,
+            "kinds": ["mic", "transcribe"],
         }
     ]
     assert data["default_backend"] == "fake"

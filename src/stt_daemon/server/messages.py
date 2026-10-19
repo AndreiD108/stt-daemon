@@ -53,6 +53,8 @@ class StartRequest:
     partials: bool = False
     word_timestamps: bool = False
     speech_id: str | None = None
+    diarize: bool = False
+    num_speakers: int | None = None
 
 
 @dataclass(frozen=True)
@@ -119,6 +121,17 @@ def parse_hello(data: Mapping[str, Any]) -> Hello:
 
 def parse_start(data: Mapping[str, Any]) -> StartRequest:
     fields = _Fields(data, "bad_request")
+    diarize = fields.flag("diarize")
+    num_speakers = data.get("num_speakers")
+    if num_speakers is not None:
+        if not _int_in(num_speakers, 1, 32):
+            raise RequestError(
+                "bad_request", "num_speakers must be an integer, 1 to 32", field="num_speakers"
+            )
+        if not diarize:
+            raise RequestError(
+                "bad_request", "num_speakers goes with diarize: true", field="num_speakers"
+            )
     return StartRequest(
         label=fields.text("label") or None,
         backend=fields.text("backend"),
@@ -129,6 +142,8 @@ def parse_start(data: Mapping[str, Any]) -> StartRequest:
         partials=fields.flag("partials"),
         word_timestamps=fields.flag("word_timestamps"),
         speech_id=fields.text("speech_id"),
+        diarize=diarize,
+        num_speakers=cast(int | None, num_speakers),
     )
 
 

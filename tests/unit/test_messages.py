@@ -127,3 +127,16 @@ def test_transcribe_takes_start_fields_and_pcm_but_no_speech_id() -> None:
         [16000, 1],
     ):
         assert code_of(parse_transcribe, {"pcm": pcm}) == ("bad_request", "pcm")
+
+
+def test_diarize_and_num_speakers() -> None:
+    request = parse_transcribe({"diarize": True, "num_speakers": 32})
+    assert (request.start.diarize, request.start.num_speakers) == (True, 32)
+    assert parse_start({}).diarize is False
+    assert code_of(parse_start, {"diarize": "yes"}) == ("bad_request", "diarize")
+    for bad in (0, 33, 2.0, True, "2"):
+        assert code_of(parse_start, {"diarize": True, "num_speakers": bad}) == (
+            "bad_request",
+            "num_speakers",
+        )
+    assert code_of(parse_start, {"num_speakers": 2}) == ("bad_request", "num_speakers")

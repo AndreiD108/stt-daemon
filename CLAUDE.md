@@ -33,9 +33,10 @@ src/                      package source
       silero_vad.LICENSE  its MIT license
     backends/             transcription backends behind one interface; BACKENDS registry in __init__
       __init__.py         BACKENDS: name → backend class
-      base.py             the contract: Backend, Connection, events, Capabilities; keyterm merge, previous_text trim
+      base.py             the contract: Backend, Connection, FileBackend (whole files), events, Capabilities; keyterm merge, previous_text trim
       elevenlabs.py       Scribe v2 Realtime: retrying open, padded short commits, in-order acks, pad-free word times
-      elevenlabs_wire.py  EL language codes, error message → (code, retryable)
+      elevenlabs_wire.py  EL language codes (639-3 → 639-1), error message → code, HTTP status → code with EL text
+      elevenlabs_batch.py  file upload API: transcribe only, bytes as sent, one retry, 20–30 s speaker runs → commits
       fake.py             FakeBackend for tests: scripted replies, partials, delays, failures, warnings, time limit
       parakeet.py         local Parakeet TDT on sherpa-onnx: shared recognizer (load at open, decodes in turn, idle unload), token → word times
       install.py          `backend install parakeet`: download, SHA-256 check, unpack, bpe.vocab from tokens.txt
@@ -54,6 +55,7 @@ src/                      package source
     session/              one session: capture → VAD → pause cutting → backend → segments
       __init__.py         empty package marker
       session.py          Session: start, audio loop, commit cadence (wall or audio time), stop (bounded) / cancel / error end, suspend / resume
+      upload.py           UploadSession: transcribe on a file backend; bytes kept, one upload at stop, no progress
       options.py          SessionOptions, MarkerRefused, start_point (where a started session takes its audio from)
       recovery.py         Link: unanswered-audio log, in-order sends, rollover, reconnect, paced replay, suspend (int16 log) / resume
       segments.py         backend answers → segments: session times via timeline, markers placed, leftover markers
@@ -79,6 +81,7 @@ src/                      package source
     credentials.py        API keys: mode-600 credentials.toml, <BACKEND>_API_KEY env, stdin keys; key writer
 tests/
   conftest.py             marks tests/live as `live` (skipped by default); a temp XDG_DATA_HOME per test
+  fake_elevenlabs_batch.py  local stand-in for the EL upload API: records multipart fields, scripted answers, hold
   fixtures/
     two_phrases.wav       TTS speech, 16 kHz: phrases at 1.00–3.74 s and 5.74–7.81 s
     jargon.wav            TTS speech, 16 kHz: three phrases with jargon words, 2 s pauses
@@ -89,6 +92,7 @@ tests/
     test_fake_backend.py  reply order, empty commits, delays, partials, failures, time limit
     test_elevenlabs_open.py    open retries and budget, HTTP and message refusals, key kept out of logs
     test_elevenlabs_stream.py  URL params, chunking, commits, padding, acks, partials, errors, self-commit
+    test_elevenlabs_batch.py   upload fields, PCM/WAV body, words and speaker split, HTTP codes, retry, cancel
     test_frames.py        ring order, since-trimming, eviction, multi-attach, attach atomicity
     test_capture.py       device choice, holds, callback, stall/status recovery, backoff, hung stop
     test_wav_capture.py   WAV reading, real-time pacing, per-session open
@@ -101,6 +105,7 @@ tests/
     test_transcript.py    final-text joining, empty segments
     test_session_audio.py   fixture sessions: word times through a cut, several commits, chunk cap, stop/cancel
     test_session_lifecycle.py  silent sessions: leftover markers, marker refusals, failure, failed open
+    test_upload_session.py  upload session: segments per speaker, markers need at, failures, cancel, input cap
     test_recovery.py      link alone: replay tail and pacing, retries, give-up, idle drop, hung send, rollover
     test_recovery_edges.py  close-time ack, unknown provider cuts, final-ack failure, in-flight commit/stop
     test_session_recovery.py  fixture sessions: word times, markers, give-up, bounded stop during recovery
@@ -126,11 +131,12 @@ tests/
     test_daemon_lifecycle.py  socket file, shutdown, context store, marker times
     test_daemon_speech.py     VAD event routing, speech_id starts (edge, expiry, mic closed, eviction)
     test_daemon_transcribe.py transcribe: ffmpeg and raw PCM, file-time word times, slots beside mic, decoder errors
+    test_daemon_batch.py      elevenlabs-batch over the socket: default rule, speakers, refusals, markers, disconnect
     test_daemon_priority.py   transcribe suspended by a dictation: same output as unsuspended; blocked writer stalls no one
     test_cli_daemon.py        key set reloads the daemon; listen prints segments, exit codes
     test_parakeet_daemon.py   `slow`, real model: commits at pauses, word times at speech edges, keyterms per stream
   live/                   opt-in (`pytest -m live`): real mic, real backend key
-    test_elevenlabs_live.py  fixture to real EL: word times at the speech edges, padded tail, bad key
+    test_elevenlabs_live.py  fixture to real EL: word times at the speech edges (realtime and upload), bad key
 pyproject.toml            package, deps, ruff/pyright/pytest settings
 README.md                 public README: pitch, client features, install, backends
 ```

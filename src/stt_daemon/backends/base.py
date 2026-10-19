@@ -35,6 +35,8 @@ class Word:
     text: str
     start_s: float
     end_s: float
+    speaker: str | None = None
+    """Who said it, as the backend names speakers; None without diarization."""
 
 
 @dataclass(frozen=True)
@@ -98,6 +100,8 @@ class Capabilities:
     commit_policy: CommitPolicy
     paced_replay: bool = True
     """Audio replayed onto a new connection goes at a bounded rate; off for local backends."""
+    diarize: bool = False
+    """Takes `OpenOptions.diarize` and names each word's speaker."""
 
 
 @dataclass(frozen=True)
@@ -110,6 +114,9 @@ class OpenOptions:
     partials: bool = False
     dictation: bool = False
     """A mic session: on a shared local model its decodes go before other sessions'."""
+    diarize: bool = False
+    num_speakers: int | None = None
+    """With `diarize`: at most this many speakers."""
 
 
 class BackendUnavailable(Exception):
@@ -170,6 +177,34 @@ class Backend(ABC):
     @abstractmethod
     async def open(self, options: OpenOptions, connection_id: int, sink: EventSink) -> Connection:
         """Raises OpenFailed. Events for the connection go to `sink`, tagged with its id."""
+
+
+@dataclass(frozen=True)
+class FileAudio:
+    data: bytes
+    """The bytes as the client sent them: a container file, or headerless s16le."""
+    pcm: tuple[int, int] | None
+    """(rate, channels) when `data` is headerless s16le."""
+
+
+class FileBackend(Backend):
+    """Takes whole files after the input ends (`transcribe` sessions only), not live audio.
+
+    Answers come back as `Committed` events with `connection_id` 0, times from the file's start;
+    the last one covers the end of the audio.
+    """
+
+    default_for: ClassVar[str | None] = None
+    """A `transcribe` with no backend uses this one when that backend is the default."""
+
+    async def open(self, options: OpenOptions, connection_id: int, sink: EventSink) -> Connection:
+        raise OpenFailed(
+            "unsupported", f"{self.name} takes transcribe sessions only", retryable=False
+        )
+
+    @abstractmethod
+    async def transcribe_file(self, audio: FileAudio, options: OpenOptions) -> list[Committed]:
+        """Raises OpenFailed when the backend refuses or fails."""
 
 
 def merge_keyterms(defaults: Iterable[str], extra: Iterable[str]) -> list[str]:

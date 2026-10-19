@@ -1,6 +1,6 @@
 """Backend answers → segments: session times through the timeline, markers placed in the text."""
 
-from ..backends.base import Committed
+from ..backends.base import Committed, Word
 from .markers import MarkerQueue, TimedWord, place
 from .timeline import Timeline
 from .transcript import Segment, Transcript
@@ -24,8 +24,12 @@ class Segments:
         start_ms = tl.to_ms(tl.to_capture(conn, boundary, "start"))
         end_ms = max(tl.to_ms(tl.to_capture(conn, end_s, "end")), start_ms)
         words: tuple[TimedWord, ...] | None = None
+        speaker = None
         if event.words is not None:
-            words = tuple(self._timed(conn, w.text, w.start_s, w.end_s) for w in event.words)
+            words = tuple(self._timed(conn, w) for w in event.words)
+            speakers = {w.speaker for w in event.words}
+            if len(speakers) == 1:
+                speaker = speakers.pop()
         markers = self.markers.take(None if final else end_ms)
         text, placed = place(event.text, words, (start_ms, end_ms), markers)
         return self.transcript.add(
@@ -35,6 +39,7 @@ class Segments:
             span=(start_ms, end_ms),
             words=words if self._word_timestamps else None,
             markers=tuple(placed),
+            speaker=speaker,
         )
 
     def leftover(self, at: float) -> Segment | None:
@@ -52,8 +57,8 @@ class Segments:
             markers=tuple(placed),
         )
 
-    def _timed(self, conn: int, text: str, start_s: float, end_s: float) -> TimedWord:
+    def _timed(self, conn: int, word: Word) -> TimedWord:
         tl = self.timeline
-        start = tl.to_ms(tl.to_capture(conn, start_s, "start"))
-        end = tl.to_ms(tl.to_capture(conn, end_s, "end"))
-        return TimedWord(text, start, max(end, start))
+        start = tl.to_ms(tl.to_capture(conn, word.start_s, "start"))
+        end = tl.to_ms(tl.to_capture(conn, word.end_s, "end"))
+        return TimedWord(word.text, start, max(end, start), word.speaker)

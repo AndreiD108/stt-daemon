@@ -47,6 +47,20 @@ class SlotState:
         data["backends"] = usage_to_wire(self.backends)
         return data
 
+    def change_key(self) -> object:
+        """What a `slot` event is sent for: not `last_speech_at`, which moves on its own."""
+        held = self.holder
+        backends = tuple(
+            (
+                u.name,
+                u.max_sessions,
+                tuple(s.session_id for s in u.sessions),
+                tuple(s.session_id for s in u.suspended),
+            )
+            for u in self.backends
+        )
+        return (self.state, held and held.client_id, held and held.session_id, backends)
+
 
 class StartRefused(Exception):
     """`busy` or `session_active`; `slot` is the slot at the time. A `busy` names the slot that

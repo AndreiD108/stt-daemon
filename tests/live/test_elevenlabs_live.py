@@ -7,9 +7,17 @@ from pathlib import Path
 import pytest
 
 from stt_daemon.audio.wav_capture import read_wav
-from stt_daemon.backends.base import BackendEvent, Committed, Failed, OpenFailed, OpenOptions
+from stt_daemon.backends.base import (
+    BackendEvent,
+    Committed,
+    Failed,
+    FileAudio,
+    OpenFailed,
+    OpenOptions,
+)
 from stt_daemon.backends.elevenlabs import ElevenLabsBackend
-from stt_daemon.config import ElevenLabsConfig
+from stt_daemon.backends.elevenlabs_batch import ElevenLabsBatchBackend
+from stt_daemon.config import Config, ElevenLabsConfig
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "two_phrases.wav"
 # Speech edges in the fixture (-40 dBFS), seconds.
@@ -65,3 +73,20 @@ async def test_a_bad_key_fails_the_open_without_retrying() -> None:
     with pytest.raises(OpenFailed) as failed:
         await backend.open(OpenOptions(), 1, lambda _: None)
     assert (failed.value.code, failed.value.retryable) == ("auth", False)
+
+
+async def test_an_upload_gives_words_at_the_speech_edges() -> None:
+    config = Config()
+    backend = ElevenLabsBatchBackend(
+        config.backends.elevenlabs_batch, config.backends.elevenlabs, _key()
+    )
+    answers = await backend.transcribe_file(
+        FileAudio(FIXTURE.read_bytes(), None), OpenOptions(diarize=True)
+    )
+    words = [w for a in answers for w in a.words or ()]
+    assert words, answers
+    assert abs(words[0].start_s - PHRASE_STARTS[0]) < 0.15
+    second = next(w for w in words if w.start_s > 4.5)
+    assert abs(second.start_s - PHRASE_STARTS[1]) < 0.15
+    assert all(w.speaker for w in words)
+    assert answers[-1].audio_end_s >= words[-1].end_s

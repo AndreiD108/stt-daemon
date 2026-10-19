@@ -8,6 +8,7 @@ from pathlib import Path
 
 from stt_daemon import __version__, control
 from stt_daemon.backends import BACKENDS
+from stt_daemon.backends.base import FileBackend
 from stt_daemon.backends.install import CREDIT, InstallError, install_parakeet
 from stt_daemon.backends.parakeet import model_dir
 from stt_daemon.config import (
@@ -123,10 +124,19 @@ def _parser() -> argparse.ArgumentParser:
         "transcribe", help="transcribe audio or video files (anything ffmpeg reads)"
     )
     transcribe.add_argument("files", nargs="+", type=Path, metavar="FILE")
-    transcribe.add_argument("--backend", help="default: the daemon's default backend")
+    transcribe.add_argument(
+        "--backend",
+        help="default: the daemon's default backend (elevenlabs-batch when that is elevenlabs)",
+    )
     transcribe.add_argument("--language", help="language code; default: the backend's")
     transcribe.add_argument(
         "--json", action="store_true", help="one JSON object per file: file, text, words, segments"
+    )
+    transcribe.add_argument(
+        "--diarize", action="store_true", help="name the speaker of each segment (elevenlabs-batch)"
+    )
+    transcribe.add_argument(
+        "--speakers", type=int, metavar="N", help="with --diarize: at most N speakers"
     )
     return parser
 
@@ -222,10 +232,11 @@ def _remove(backend: str) -> int:
         return _fail(f"{backend} is not installed: there is no model in {model}")
     config = load_config()
     if config.backends.default == backend:
-        from stt_daemon.server.backend_set import load_setup
+        from stt_daemon.server.backend_set import kinds_of, load_setup
 
         setup = load_setup(config, load_credentials())
-        if (other := next((n for n in setup.backends if n != backend), None)) is not None:
+        others = (n for n, b in setup.backends.items() if n != backend and "mic" in kinds_of(b))
+        if (other := next(others, None)) is not None:
             set_config_string("backends", "default", other)
         else:
             remove_config_key("backends", "default")
@@ -243,6 +254,11 @@ def _set_default(backend: str) -> int:
     if backend not in setup.backends:
         reason = setup.unavailable.get(backend, "not set up")
         return _fail(f"{backend} is not set up: {reason}")
+    if issubclass(cls := BACKENDS[backend], FileBackend):
+        return _fail(
+            f"{backend} takes transcribe sessions only, so it can't be the default; "
+            f"with {cls.default_for} as the default, transcribe uses {backend}"
+        )
     set_config_string("backends", "default", backend)
     print(f"{backend} is the default backend")
     return _reload_daemon()
@@ -285,5 +301,11 @@ def _listen(args: argparse.Namespace) -> int:
 def _transcribe(args: argparse.Namespace) -> int:
     from stt_daemon.transcribe_client import TranscribeOptions, transcribe
 
-    options = TranscribeOptions(backend=args.backend, language=args.language, json=args.json)
+    options = TranscribeOptions(
+        backend=args.backend,
+        language=args.language,
+        json=args.json,
+        diarize=args.diarize or args.speakers is not None,
+        num_speakers=args.speakers,
+    )
     return asyncio.run(transcribe(socket_path(), args.files, options, sys.stdout, sys.stderr))

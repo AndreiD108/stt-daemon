@@ -27,10 +27,12 @@ from ..session.events import (
 )
 from ..session.options import start_point
 from ..session.session import Session
+from ..session.upload import UploadSession
 from .backend_slots import BackendSession, BackendSlots
 from .slot_state import Client, Holder, SlotState, StartRefused, StateName
 
 type Emit = Callable[[SessionEvent], None]
+type AnySession = Session | UploadSession
 
 
 class ClientGone(Exception):
@@ -41,7 +43,7 @@ class ClientGone(Exception):
 class _Claim:
     client: Client
     session_label: str | None
-    session: Session | None = None
+    session: AnySession | None = None
     started_at: int | None = None
     started_mono: float = 0.0
     evictable: bool = False
@@ -84,7 +86,7 @@ class Slot:
         self._resuming: set[asyncio.Task[bool]] = set()
         self._closing = False
         self.backends = BackendSlots(capacities)
-        self._announced = _change_key(SlotState("idle", backends=self.backends.usage()))
+        self._announced = SlotState("idle", backends=self.backends.usage()).change_key()
         self._speaking = False
         self._last_speech: float | None = None
 
@@ -112,7 +114,7 @@ class Slot:
         """Monotonic time speech was last heard; now while speech goes on."""
         return time.monotonic() if self._speaking else self._last_speech
 
-    def session_of(self, client_id: str) -> Session | None:
+    def session_of(self, client_id: str) -> AnySession | None:
         """The client's started session: the mic holder's, or one on a backend slot only."""
         claim = self._holder
         if claim is None or claim.client.client_id != client_id:
@@ -125,7 +127,7 @@ class Slot:
         self,
         client: Client,
         *,
-        make_session: Callable[[Emit], Session],
+        make_session: Callable[[Emit], AnySession],
         session_label: str | None = None,
         since: float | None = None,
         requested_at: float | None = None,
@@ -169,7 +171,7 @@ class Slot:
         self,
         client: Client,
         *,
-        make_session: Callable[[Emit], Session],
+        make_session: Callable[[Emit], AnySession],
         session_label: str | None = None,
     ) -> SessionStarted:
         """Start a session that takes a backend slot only. Raises `StartRefused`, `ClientGone`,
@@ -438,7 +440,7 @@ class Slot:
         if holder is not None and holder.started_at is None:
             return
         state = self.state
-        key = _change_key(state)
+        key = state.change_key()
         if key != self._announced:
             self._announced = key
             self._on_change(state)
@@ -488,18 +490,3 @@ class Slot:
 def _rank(claim: _Claim) -> int:
     assert claim.session is not None
     return KIND_RANK[claim.session.kind]
-
-
-def _change_key(state: SlotState) -> object:
-    """What a `slot` event is sent for: not `last_speech_at`, which moves on its own."""
-    held = state.holder
-    backends = tuple(
-        (
-            u.name,
-            u.max_sessions,
-            tuple(s.session_id for s in u.sessions),
-            tuple(s.session_id for s in u.suspended),
-        )
-        for u in state.backends
-    )
-    return (state.state, held and held.client_id, held and held.session_id, backends)

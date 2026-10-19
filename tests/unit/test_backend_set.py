@@ -1,9 +1,17 @@
 from collections.abc import Callable
 from dataclasses import replace
+from typing import Self
 
 import pytest
 
-from stt_daemon.backends.base import Backend, BackendUnavailable
+from stt_daemon.backends.base import (
+    Backend,
+    BackendUnavailable,
+    Committed,
+    FileAudio,
+    FileBackend,
+    OpenOptions,
+)
 from stt_daemon.backends.fake import FAKE_CAPABILITIES, FakeBackend
 from stt_daemon.config import Config
 from stt_daemon.credentials import Credentials
@@ -110,3 +118,49 @@ def test_backend_choice_errors() -> None:
     assert "stt-daemon key set other" in error.message
     assert refused(setup, backend="nope").code == "unknown_backend"
     assert resolve(setup, StartRequest(backend="b0"), no_lookup).backend is setup.backends["b0"]
+
+
+class FilesFake(FileBackend):
+    capabilities = replace(FAKE_CAPABILITIES, partials=False, diarize=True)
+    name = "files"
+    default_for = "b0"
+
+    @classmethod
+    def create(cls, config: Config, credentials: Credentials) -> Self:
+        return cls()
+
+    async def transcribe_file(self, audio: FileAudio, options: OpenOptions) -> list[Committed]:
+        return []
+
+
+def transcribe_backend(setup: Setup, **request: object) -> str:
+    resolved = resolve(setup, StartRequest(**request), no_lookup, kind="transcribe")  # type: ignore[arg-type]
+    return resolved.backend.name
+
+
+def test_transcribe_default_follows_the_default_backend() -> None:
+    files = FilesFake()
+    assert transcribe_backend(setup_of(FakeBackend(), files)) == "files"
+    assert transcribe_backend(setup_of(FakeBackend(), files, FakeBackend(), default="b2")) == "fake"
+    assert transcribe_backend(setup_of(FakeBackend(), files), backend="b0") == "fake"
+    with pytest.raises(RequestError) as caught:
+        resolve(setup_of(), StartRequest(), no_lookup, kind="transcribe")
+    assert caught.value.code == "no_backend"
+
+
+def test_a_file_backend_takes_transcribe_sessions_only_and_is_never_the_default() -> None:
+    setup = setup_of(FilesFake(), FakeBackend())
+    assert setup.default == "b1"
+    assert setup_of(FakeBackend(), FilesFake(), default="b1").default == "b0"
+    assert refused(setup, backend="b0").code == "unsupported"
+    assert [b["kinds"] for b in setup.backends_wire()] == [["transcribe"], ["mic", "transcribe"]]
+
+
+def test_diarize_on_a_backend_without_it_is_an_unsupported_option() -> None:
+    setup = setup_of(FakeBackend(), FilesFake())
+    error = refused(setup, diarize=True)
+    assert (error.code, error.to_wire()["field"]) == ("unsupported_option", "diarize")
+    resolved = resolve(
+        setup, StartRequest(diarize=True, num_speakers=2), no_lookup, kind="transcribe"
+    )
+    assert (resolved.options.open.diarize, resolved.options.open.num_speakers) == (True, 2)

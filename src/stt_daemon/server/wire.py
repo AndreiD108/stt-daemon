@@ -12,6 +12,7 @@ from ..session.events import (
     SessionStarted,
     SessionSuspended,
 )
+from ..session.markers import TimedWord
 from ..session.transcript import Segment
 from .slot_state import Client
 
@@ -92,12 +93,12 @@ def segment(seg: Segment, session_id: str) -> dict[str, object]:
     data: dict[str, object] = {"session_id": session_id, "index": seg.index, "text": seg.text}
     if seg.language is not None:
         data["language"] = seg.language
+    if seg.speaker is not None:
+        data["speaker"] = seg.speaker
     data["start_ms"] = seg.start_ms
     data["end_ms"] = seg.end_ms
     if seg.words is not None:
-        data["words"] = [
-            {"text": w.text, "start_ms": w.start_ms, "end_ms": w.end_ms} for w in seg.words
-        ]
+        data["words"] = [_word(w) for w in seg.words]
     if seg.markers:
         markers: list[dict[str, object]] = []
         for m in seg.markers:
@@ -106,4 +107,11 @@ def segment(seg: Segment, session_id: str) -> dict[str, object]:
                 marker["after_word"] = m.after_word
             markers.append(marker)
         data["markers"] = markers
+    return data
+
+
+def _word(word: TimedWord) -> dict[str, object]:
+    data: dict[str, object] = {"text": word.text, "start_ms": word.start_ms, "end_ms": word.end_ms}
+    if word.speaker is not None:
+        data["speaker"] = word.speaker
     return data
