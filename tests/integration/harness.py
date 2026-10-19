@@ -140,10 +140,10 @@ class Harness:
         sources: SourceScan | None = None,
         aec_command: aec_pipewire.Command | None = None,
     ) -> Server:
-        """Without `sources`, no source scan runs; without `aec_command`, echo cancellation is
-        off."""
+        """Without `sources`, no source scan runs; without `aec_command` or an `echo_cancel`
+        mode set in `config`, echo cancellation is off."""
         config = config or Config()
-        if aec_command is None:
+        if aec_command is None and config.audio.echo_cancel == "auto":
             config = replace(config, audio=replace(config.audio, echo_cancel="off"))
         if backends is None:
             backends = {"fake": backend or fake()}

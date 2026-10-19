@@ -2,13 +2,13 @@
 slot, and their failures as `error` replies. Mixed into `Server`."""
 
 import contextlib
-import logging
 import sys
 import uuid
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
 
 from ..audio import aec_pipewire
+from ..audio.aec_builtin import BuiltinEchoCancelledMic
 from ..audio.aec_pipewire import EchoCancelledMic, PipewireAec
 from ..audio.capture import CaptureSource, CaptureUnavailable
 from ..audio.pw_capture import AppTarget, PwRecordCapture
@@ -27,8 +27,6 @@ from .slot import AnySession, ClientGone, Slot
 from .slot_state import StartRefused
 from .sources import Source, SourceScan
 from .speech import SpeechWatch
-
-log = logging.getLogger(__name__)
 
 
 def system_capture(target: AppTarget | None) -> PwRecordCapture:
@@ -181,7 +179,9 @@ class Starts:
                 options=resolved.options,
                 emit=emit,
                 kind="system",
-                mic=self._mic_track(setup.config, session_id) if request.with_mic else None,
+                mic=self._mic_track(setup.config, session_id, capture)
+                if request.with_mic
+                else None,
                 session_id=session_id,
             )
             self._running[cid] = Running(
@@ -194,12 +194,12 @@ class Starts:
                 conn.client, make_session=make_session, session_label=request.start.label
             )
 
-    def _mic_track(self, config: Config, session_id: str) -> CaptureSource:
+    def _mic_track(self, config: Config, session_id: str, system: CaptureSource) -> CaptureSource:
         """A system session's mic track: the mic with the speakers' sound taken out, when
         `audio.echo_cancel` allows."""
         mode = echo_cancel_mode(config.audio)
         if mode == "builtin":
-            log.info("built-in echo cancellation is not available; the mic track takes the mic")
+            return BuiltinEchoCancelledMic(self.capture, system)
         if mode != "pipewire":
             return self.capture
         aec = PipewireAec(

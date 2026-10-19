@@ -141,6 +141,8 @@ class Track:
         """Stop taking audio; with `drain`, first take what capture delivered before now."""
         assert self._attachment is not None
         assert self._audio_task is not None
+        if drain:
+            await self.capture.settle(time.monotonic())
         self._attachment.detach()
         if drain:
             # A task, not put_nowait: a stream's queue is bounded. It runs after the frames

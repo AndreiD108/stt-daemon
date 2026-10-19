@@ -5,6 +5,19 @@ import pytest
 _LIVE_DIR = Path(__file__).parent / "live"
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption("--dump-dir", type=Path, help="where live tests write the audio they record")
+
+
+@pytest.fixture
+def dump_dir(request: pytest.FixtureRequest, tmp_path: Path) -> Path:
+    chosen: Path | None = request.config.getoption("--dump-dir")
+    if chosen is None:
+        return tmp_path
+    chosen.mkdir(parents=True, exist_ok=True)
+    return chosen
+
+
 @pytest.fixture(autouse=True)
 def _own_data_dir(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch

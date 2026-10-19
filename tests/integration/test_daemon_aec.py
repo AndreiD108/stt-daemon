@@ -6,7 +6,9 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
+import aec_fixture
 import fake_pw_cli
+import numpy as np
 from fake_pw_dump import FakePipeWire
 from harness import FIXTURE, Harness, Msg, TestClient
 
@@ -15,10 +17,12 @@ from stt_daemon.audio.pw_capture import AppTarget, PwRecordCapture
 from stt_daemon.audio.wav_capture import WavCapture
 from stt_daemon.backends.base import CommitPolicy
 from stt_daemon.backends.fake import FAKE_CAPABILITIES, FakeBackend
+from stt_daemon.config import AudioConfig, Config
 from stt_daemon.server.sources import SourceScan
 
 FAKE_PW_RECORD = str(Path(__file__).parents[1] / "fake_pw_record.py")
 PAUSES = replace(FAKE_CAPABILITIES, commit_policy=CommitPolicy(at_pauses=True))
+MIC_NOISE_DB = -60.0
 
 
 class Setup:
@@ -68,6 +72,15 @@ async def start(
 
 def track_segments(client: TestClient, track: str) -> list[Msg]:
     return [m for m in client.of_type("segment") if m["data"]["track"] == track]
+
+
+def longest_gap(spans: list[tuple[int, int]], start: int, end: int) -> int:
+    """The longest stretch of [start, end] ms no span covers."""
+    longest, at = 0, start
+    for s, e in sorted(spans):
+        longest = max(longest, min(s, end) - at)
+        at = max(at, e)
+    return max(longest, end - at)
 
 
 def aec_errors(client: TestClient) -> list[Msg]:
@@ -132,3 +145,39 @@ async def test_pw_cli_ending_mid_session_moves_the_mic_track_to_the_plain_mic(
     await asyncio.sleep(0.2)
     await scribbly.request("stop_session")
     assert len(aec_errors(scribbly)) == 1
+
+
+async def test_the_built_in_canceller_keeps_the_speakers_out_of_the_mic_track(
+    daemon: Harness, tmp_path: Path
+) -> None:
+    clip = slice(0, round(14.0 * aec_fixture.RATE))
+    fixture = aec_fixture.build()
+    far, mixed = tmp_path / "far.wav", tmp_path / "mixed.wav"
+    aec_fixture.write(far, fixture.far[clip])
+    # A mic's noise floor: without one, the VAD wavers on the faint residual echo.
+    noise = np.random.default_rng(1).standard_normal(clip.stop) * 10 ** (MIC_NOISE_DB / 20)
+    aec_fixture.write(mixed, fixture.mixed[clip] + noise)
+    mic = WavCapture()
+    config = Config(audio=AudioConfig(echo_cancel="builtin"))
+    await daemon.start(
+        FakeBackend([f"text {i}" for i in range(20)], capabilities=PAUSES),
+        capture=mic,
+        config=config,
+        system_capture=lambda _target: PwRecordCapture(
+            [sys.executable, FAKE_PW_RECORD, "--wav", str(far)]
+        ),
+    )
+    scribbly, _ = await daemon.connect("Scribbly")
+    started = await scribbly.request("start_system_session", {"with_mic": True})
+    assert started["data"]["tracks"] == ["system", "mic"], started
+    mic.play(mixed)
+    await asyncio.sleep(14.5)
+    await scribbly.request("stop_session")
+    spans = [(m["data"]["start_ms"], m["data"]["end_ms"]) for m in track_segments(scribbly, "mic")]
+    near_start = round(aec_fixture.NEAR_PHRASES[0][0] * 1000)
+    # The speakers play with no pause the VAD would hear from 3.1 s to the near end's phrase; the
+    # filter converges in the first seconds, so the mic track falls silent before that phrase.
+    assert longest_gap(spans, 5000, near_start) >= 1000, spans
+    # The phrase's segment may start with the speakers' phrase it overlaps, at 8.8 s.
+    assert [s for s in spans if 8700 <= s[0] <= near_start + 300], spans
+    assert aec_errors(scribbly) == []

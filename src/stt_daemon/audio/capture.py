@@ -129,6 +129,11 @@ class CaptureSource(ABC):
         """Live frames from now on, whenever the source is open; no hold, no open check."""
         return self._hub.attach(time.monotonic())
 
+    async def settle(self, until: float) -> None:
+        """Wait, bounded, until audio up to `until` (monotonic) is pushed; for sources that hold
+        audio back while processing it."""
+        return
+
     def ring_since(self, since: float | None = None) -> list[Frame]:
         return self._hub.ring_since(since)
 
