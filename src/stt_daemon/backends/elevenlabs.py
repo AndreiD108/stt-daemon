@@ -91,6 +91,10 @@ class ElevenLabsBackend(Backend):
         return f"ElevenLabsBackend(model_id={self._config.model_id!r})"
 
     @property
+    def max_sessions(self) -> int:
+        return self._config.max_sessions
+
+    @property
     def default_language(self) -> str:
         return self._config.language
 

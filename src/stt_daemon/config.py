@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
+DEFAULT_MAX_SESSIONS = 2
 
 
 class ConfigError(Exception):
@@ -69,6 +70,7 @@ class ElevenLabsConfig:
     endpoint: str = "wss://api.elevenlabs.io/v1/speech-to-text/realtime"
     language: str = "auto"
     keyterms: list[str] = field(default_factory=list[str])
+    max_sessions: int = DEFAULT_MAX_SESSIONS
 
 
 @dataclass
@@ -76,6 +78,7 @@ class ParakeetConfig:
     keyterms: list[str] = field(default_factory=list[str])
     hotwords_score: float = 1.5
     """Bias per keyterm token in beam search; too high and keyterms replace similar words."""
+    max_sessions: int = DEFAULT_MAX_SESSIONS
 
 
 @dataclass
@@ -217,6 +220,11 @@ def _validate(config: Config, path: Path) -> None:
     check(config.session.stop_wait_ms > 0, "session.stop_wait_ms", "positive")
     score = config.backends.parakeet.hotwords_score
     check(0 < score <= 10, "backends.parakeet.hotwords_score", "above 0, at most 10")
+    for name, section in (
+        ("elevenlabs", config.backends.elevenlabs),
+        ("parakeet", config.backends.parakeet),
+    ):
+        check(section.max_sessions >= 1, f"backends.{name}.max_sessions", "1 or more")
     check(config.slot.evictable_after_s > 0, "slot.evictable_after_s", "positive")
     level = config.logging.level.upper()
     check(level in LOG_LEVELS, "logging.level", f"one of {', '.join(LOG_LEVELS)}")

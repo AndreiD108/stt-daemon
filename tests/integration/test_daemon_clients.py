@@ -1,4 +1,5 @@
-"""Several clients over the socket: hello gate, busy and eviction, observers, disconnects."""
+"""Several clients over the socket: hello gate, busy and eviction, backend capacity, observers,
+disconnects."""
 
 import asyncio
 import os
@@ -6,6 +7,7 @@ import os
 from harness import Harness, fake, setup_with
 
 from stt_daemon.config import Config
+from stt_daemon.server.backend_slots import BackendSession
 
 
 async def test_the_first_message_must_be_hello(daemon: Harness) -> None:
@@ -55,7 +57,10 @@ async def test_welcome_describes_the_daemon(daemon: Harness) -> None:
     ]
     assert data["default_backend"] == "fake"
     assert data["mic_open"] is True
-    assert data["slot"] == {"state": "idle"}
+    assert data["slot"] == {
+        "state": "idle",
+        "backends": {"fake": {"max_sessions": 2, "sessions": []}},
+    }
 
 
 async def test_without_a_backend_starts_fail_and_name_the_setup_commands(daemon: Harness) -> None:
@@ -95,15 +100,30 @@ async def test_busy_then_eviction_end_to_end(daemon: Harness) -> None:
     started = await scribbly.request("start_session", {"label": "desks.html"})
     assert started["type"] == "session_started"
     assert started["data"]["client_label"] == "Scribbly"
+    assert started["data"]["kind"] == "mic"
     busy = await talkey.event("slot", state="busy")
     holder = busy["data"]["holder"]
     assert holder["client_label"] == "Scribbly"
     assert holder["session_label"] == "desks.html"
     assert holder["pid"] == os.getpid()
     assert holder["since"] == started["data"]["started_at"]
+    assert busy["data"]["backends"]["fake"]["sessions"] == [
+        {
+            "session_id": started["data"]["session_id"],
+            "kind": "mic",
+            "pid": os.getpid(),
+            "client_label": "Scribbly",
+        }
+    ]
     refused = await talkey.request("start_session")
     assert refused["data"]["code"] == "busy"
     assert refused["data"]["slot"]["state"] == "busy"
+    assert refused["data"]["full_slot"] == "mic"
+    assert refused["data"]["holder"] == {
+        "pid": os.getpid(),
+        "client_label": "Scribbly",
+        "kind": "mic",
+    }
     await talkey.event("slot", state="evictable", timeout=3)
     took = await talkey.request("start_session")
     assert took["type"] == "session_started"
@@ -188,3 +208,35 @@ async def test_reload_replies_and_tells_every_other_client(daemon: Harness) -> N
     assert told["data"] == reply["data"]
     assert not a.of_type("backends")[1:]
     assert (await a.request("start_session"))["data"]["code"] == "no_backend"
+
+
+async def test_a_full_backend_answers_busy_naming_it(daemon: Harness) -> None:
+    backend = fake()
+    backend.capacity = 1
+    server = await daemon.start(backend)
+    held = BackendSession("held", "mic", "fake", "c0", 77, "Log")
+    server._slot.backends.take(held)  # pyright: ignore[reportPrivateUsage]
+    client, _ = await daemon.connect("Talkey")
+    refused = await client.request("start_session")
+    assert refused["data"]["code"] == "busy"
+    assert refused["data"]["full_slot"] == "backend"
+    assert refused["data"]["backend"] == "fake"
+    assert refused["data"]["holder"] == {"pid": 77, "client_label": "Log", "kind": "mic"}
+    assert refused["data"]["slot"]["state"] == "idle"
+    assert not client.of_type("slot")
+
+
+async def test_reload_picks_up_a_new_capacity(daemon: Harness) -> None:
+    await daemon.start()
+    a, _ = await daemon.connect("A")
+    smaller = fake()
+    smaller.capacity = 1
+    daemon.reloads = [setup_with(Config(), {"fake": smaller})]
+    await a.request("reload")
+    slot = await a.event("slot")
+    assert slot["data"] == {
+        "state": "idle",
+        "backends": {"fake": {"max_sessions": 1, "sessions": []}},
+    }
+    order = [m["type"] for m in a.received if m["type"] in ("backends", "slot")]
+    assert order == ["backends", "slot"]

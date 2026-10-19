@@ -1,8 +1,11 @@
 # stt-daemon protocol
 
-One daemon owns the mic; many clients connect; one session runs at a time. The session slot (the
+One daemon owns the mic; many clients connect; one mic session runs at a time. The mic slot (the
 slot) is the right to run that session: a client takes it with `start_session` and gives it back
-when its session ends.
+when its session ends. Each backend also has slots: a session takes one on its backend, and a
+backend runs at most `max_sessions` sessions at once (config `backends.<name>.max_sessions`,
+default 2). Capacity counts sessions, not clients. Every session today is a mic session (`kind:
+"mic"`), so it takes the mic slot and one backend slot.
 
 A minimal client: connect, send `hello`, read `welcome`, send `start_session`, read `segment`
 events, send `stop_session`, read `session_ended`. Error codes are in [Error codes](#error-codes).
@@ -105,9 +108,12 @@ Hints (`keyterms`, `previous_text`, `context_key`) are dropped when the backend 
 backend's entry in `welcome` says which it takes. Features (`partials`, `word_timestamps`) fail the
 start with `unsupported` when the backend lacks them.
 
-Checks run in this order, before the slot changes: field types (`bad_request`), `speech_id`
-(`speech_expired`), the slot (`session_active`, `busy`), then the backend, language and features.
-So a request for a missing backend sent while the slot is `busy` gets `busy`.
+Checks run in this order, before either slot changes: field types (`bad_request`), `speech_id`
+(`speech_expired`), the mic slot (`session_active`, `busy`), the backend, language and features,
+then room on the backend (`busy`). So a request for a missing backend sent while the mic slot is
+`busy` gets `busy`. An evictable holder's session doesn't count against its backend's capacity:
+a start that would evict it is refused only when the backend is full without it, and then nothing
+is evicted.
 
 When the slot is `evictable`, the daemon takes it over in this order:
 
@@ -122,7 +128,10 @@ When the slot is `evictable`, the daemon takes it over in this order:
 4. Start this session: `slot`, then `session_started`. If this client disconnects or its start
    fails from step 3 on, the copy is dropped and the slot goes idle.
 
-When the slot is `busy`, the start fails; clients that follow `slot` events don't send it then.
+The holder's session keeps its backend slot until its `session_ended` goes out.
+
+When the mic slot is `busy`, or the backend has no room, the start fails with `busy`; clients that
+follow `slot` events don't send it then.
 
 Reply: `session_started`, or `error` with one of the start codes in [Error codes](#error-codes).
 
@@ -182,8 +191,11 @@ as for `stop_session`.
 ```
 
 Re-reads config and credentials and rescans installed backends. Sent by the `stt-daemon` CLI after
-`key set`, `backend install` and `backend set-default`. A running session keeps its backend;
-changes to `[audio]` and `[slot]` take effect when the daemon restarts. `[vad]` changes apply to
+`key set`, `backend install` and `backend set-default`. A running session keeps its backend,
+even one no longer set up. A new `max_sessions` applies to the next start; a backend over its new
+capacity keeps its sessions until they end. When backends or capacities change, a `slot` event
+follows the `backends` event. Changes to `[audio]` and `[slot]` take effect when the daemon
+restarts. `[vad]` changes apply to
 sessions started after the reload, but VAD events keep the old settings until a restart. Reply: `backends`; every
 other client gets the same `backends` event. Or `error {code: "config"}` when the config or
 credentials file is invalid (bad TOML, a bad value, credentials not mode 600); the daemon keeps its
@@ -214,7 +226,7 @@ sent during a slow start waits for the start; a `ping` doesn't).
   ],
   "default_backend": "elevenlabs",
   "mic_open": true,
-  "slot": {"state": "idle"}
+  "slot": {"state": "idle", "backends": {"elevenlabs": {"max_sessions": 2, "sessions": []}}}
 }
 ```
 
@@ -224,7 +236,7 @@ sent during a slow start waits for the start; a `ping` doesn't).
 - `default_backend`: the user's global default, `null` when there is no backend; the first backend
   set up, changed with `stt-daemon backend set-default <backend>`.
 - `slot` has the `slot` event's shape. Unlike `slot` events, it can show a holder whose session is
-  still starting (`since: null`).
+  still starting (`since: null`), and that session in `backends`.
 - `mic_open`: the daemon keeps the mic open between sessions (config `audio.keep_mic_open`,
   default true). When false, the mic opens at each start: VAD events flow only during sessions,
   sessions start at the command, and each start waits for the device.
@@ -239,7 +251,8 @@ Sent to every client after a `reload`. Same shapes as in `welcome`.
 
 ### `slot`
 
-Sent to every client when the slot changes state or holder.
+Sent to every client when the mic slot changes state or holder, when a backend slot is taken or
+released, and when a `reload` changes the backends or their `max_sessions`.
 
 ```json
 {
@@ -253,11 +266,19 @@ Sent to every client when the slot changes state or holder.
     "session_id": "…",
     "since": 1760000000000,
     "last_speech_at": 1760000300000
+  },
+  "backends": {
+    "elevenlabs": {
+      "max_sessions": 2,
+      "sessions": [{"session_id": "…", "kind": "mic", "pid": 41230, "client_label": "Scribbly"}]
+    },
+    "parakeet": {"max_sessions": 2, "sessions": []}
   }
 }
 ```
 
-- `state`: `idle` (no `holder`) | `busy` | `evictable`.
+- `state` and `holder` describe the mic slot. `state`: `idle` (no `holder`) | `busy` |
+  `evictable`.
 - `evictable`: no speech detected for 5 minutes (config `slot.evictable_after_s`). Once evictable,
   the session stays evictable until it ends; later speech doesn't turn it back to `busy`.
 - Every `holder` field is present; all but `client_id` can be `null`.
@@ -268,6 +289,11 @@ Sent to every client when the slot changes state or holder.
   and in the `slot` of a `busy` error). `slot` events come only once it has started.
 - `last_speech_at`: when speech was last heard in this session (the time of this event while
   speech goes on); `null` when there was none yet. The slot doesn't send an event for each speech.
+- `backends`: every backend set up, by name, with its `max_sessions` and the sessions holding its
+  slots, oldest first; `{}` when none is set up. A backend that a `reload` dropped stays listed
+  while it still has sessions. `pid` and `client_label` can be `null`. During a takeover, the
+  evicted session stays listed until its `session_ended`, so a backend can briefly list more
+  sessions than `max_sessions`.
 
 ### `session_started`
 
@@ -277,6 +303,7 @@ Sent to every client when the slot changes state or holder.
   "client_id": "c7",
   "client_label": "Scribbly",
   "session_label": "desks.html",
+  "kind": "mic",
   "backend": "elevenlabs",
   "language": "auto",
   "started_at": 1760000000000,
@@ -284,6 +311,7 @@ Sent to every client when the slot changes state or holder.
 }
 ```
 
+- `kind`: `mic`, a session on the daemon's mic, the only kind today.
 - `started_at`: capture time of the session's first sample.
 - `previous_text`: the context hint the session uses, from the command or the `context_key` store,
   before the backend trims it; `null` when none.
@@ -393,7 +421,7 @@ Codes of `error` replies, and of `session_error` for the backend codes.
 | `protocol_unsupported` | `hello` | `supported` lists the daemon's protocol versions. |
 | `observers_disabled` | `hello` | The config has `server.observers = false`; connect without `observe_all`. |
 | `bad_request` | any | Not a valid message or command; `field` names a field of the wrong type. |
-| `busy` | `start_session` | Another client holds the slot; `slot` has it. Wait for a `slot` event with `idle` or `evictable`. |
+| `busy` | `start_session` | A slot is full; `slot` has every slot. `full_slot`: `mic` (another client holds the mic slot; wait for a `slot` event with `idle` or `evictable`) or `backend` (`backend` runs `max_sessions` sessions; wait for room or use another backend). `holder` (`pid`, `client_label`, `kind`; the first two can be `null`) is the session in the way: the mic holder, or the oldest on the backend. |
 | `session_active` | `start_session` | This client already holds a session; `slot` has it. Stop it first. |
 | `speech_expired` | `start_session` | The `speech_id` is unknown or its start left the buffer. Start without it. |
 | `no_backend` | `start_session` | No backend set up; the message names `stt-daemon key set elevenlabs` and `stt-daemon backend install parakeet`. |

@@ -78,6 +78,7 @@ def test_values_override_defaults_and_ints_pass_as_floats(tmp_path: Path) -> Non
         ("[vad]\nmin_speech_ms = true\n", "vad.min_speech_ms"),
         ("[backends.elevenlabs]\nkeyterms = [1]\n", "backends.elevenlabs.keyterms"),
         ("[backends]\ndefault = 3\n", "backends.default"),
+        ("[backends.parakeet]\nmax_sessions = 1.5\n", "backends.parakeet.max_sessions"),
         ("audio = 3\n", "audio"),
     ],
 )
@@ -103,6 +104,16 @@ def test_out_of_range_value_fails(tmp_path: Path) -> None:
     path.write_text("[audio]\nbuffer_ms = 500\npre_start_ms = 1000\n")
     with pytest.raises(ConfigError, match=r"audio\.pre_start_ms"):
         load_config(path)
+
+
+@pytest.mark.parametrize("backend", ["elevenlabs", "parakeet"])
+def test_max_sessions_must_be_at_least_one(tmp_path: Path, backend: str) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(f"[backends.{backend}]\nmax_sessions = 0\n")
+    with pytest.raises(ConfigError, match=rf"backends\.{backend}\.max_sessions"):
+        load_config(path)
+    path.write_text(f"[backends.{backend}]\nmax_sessions = 1\n")
+    assert getattr(load_config(path).backends, backend).max_sessions == 1
 
 
 def test_invalid_toml_fails_with_path(tmp_path: Path) -> None:

@@ -1,4 +1,5 @@
-"""The session slot: states, sticky evictable, takeover order and failures, client_gone."""
+"""The mic and backend slots: states, sticky evictable, takeover order and failures,
+backend capacity, client_gone."""
 
 import asyncio
 import time
@@ -16,6 +17,7 @@ from stt_daemon.audio.wav_capture import WavCapture
 from stt_daemon.backends.base import OpenFailed, OpenOptions
 from stt_daemon.backends.fake import FakeBackend
 from stt_daemon.config import Config
+from stt_daemon.server.backend_slots import BackendSession
 from stt_daemon.server.peer import Peer
 from stt_daemon.server.slot import Client, ClientGone, Emit, Slot, SlotState, StartRefused
 from stt_daemon.session.events import EvictedBy, SessionEnded, SessionEvent, SessionStarted
@@ -53,13 +55,25 @@ class SlowStop(Session):
         return await asyncio.shield(self.stopping)
 
 
+class OtherFake(FakeBackend):
+    name = "other"
+
+
 class Harness:
-    def __init__(self, capture: CaptureSource, evictable_after_s: float = 300.0) -> None:
+    def __init__(
+        self,
+        capture: CaptureSource,
+        evictable_after_s: float = 300.0,
+        capacities: dict[str, int] | None = None,
+    ) -> None:
         self.capture = capture
+        self.capacities = {"fake": 2} if capacities is None else capacities
         self.log: list[tuple[str, ...]] = []
         self.changes: list[SlotState] = []
         self.ended_at: dict[str, float] = {}
         self.ended: dict[str, SessionEnded] = {}
+        self.backends_at_end: dict[str, list[str]] = {}
+        """Per ended client: who held backend slots as its `session_ended` went out."""
         self.gone_at_start: set[str] = set()
         """Clients that disconnect as their `session_started` goes out."""
         self.slot = Slot(
@@ -68,6 +82,7 @@ class Harness:
             evictable_after_s=evictable_after_s,
             on_change=self._changed,
             on_event=self._event,
+            capacities=lambda: self.capacities,
         )
 
     def _changed(self, state: SlotState) -> None:
@@ -82,6 +97,8 @@ class Harness:
         elif isinstance(event, SessionEnded):
             self.log.append((client.client_id, event.reason))
             self.ended[client.client_id] = event
+            held = [s.client_id for u in self.slot.state.backends for s in u.sessions]
+            self.backends_at_end[client.client_id] = held
             self.ended_at[client.client_id] = time.monotonic()
 
     def maker(
@@ -110,6 +127,19 @@ class Harness:
 
     async def evictable(self) -> None:
         await wait_until(lambda: self.slot.state.state == "evictable", 2.0)
+
+    def occupy(self, backend: str = "fake", client: Client = C) -> BackendSession:
+        """A session of another kind, holding a backend slot without the mic slot."""
+        place = BackendSession(
+            f"held-{client.client_id}", "mic", backend, client.client_id, 77, "Log"
+        )
+        self.slot.backends.take(place)
+        return place
+
+    def on(self, backend: str) -> list[str]:
+        """Client ids of the sessions holding `backend`'s slots."""
+        [usage] = [u for u in self.slot.state.backends if u.name == backend]
+        return [s.client_id for s in usage.sessions]
 
 
 @pytest.fixture
@@ -140,7 +170,21 @@ async def test_start_announces_busy_before_started_and_idle_after_ended(
             "since": started.started_at,
             "last_speech_at": None,
         },
+        "backends": {
+            "fake": {
+                "max_sessions": 2,
+                "sessions": [
+                    {
+                        "session_id": started.session_id,
+                        "kind": "mic",
+                        "pid": 41230,
+                        "client_label": "Scribbly",
+                    }
+                ],
+            }
+        },
     }
+    assert started.kind == "mic"
     session = h.slot.session_of("c1")
     assert session is not None
     assert h.slot.session_of("c2") is None
@@ -151,7 +195,10 @@ async def test_start_announces_busy_before_started_and_idle_after_ended(
         ("c1", "stopped"),
         ("slot", "idle", ""),
     ]
-    assert h.slot.state.to_wire() == {"state": "idle"}
+    assert h.slot.state.to_wire() == {
+        "state": "idle",
+        "backends": {"fake": {"max_sessions": 2, "sessions": []}},
+    }
 
 
 async def test_busy_and_session_active_refusals(silent: SpyCapture) -> None:
@@ -162,9 +209,14 @@ async def test_busy_and_session_active_refusals(silent: SpyCapture) -> None:
     assert busy.value.code == "busy"
     assert busy.value.slot.holder is not None
     assert busy.value.slot.holder.client_id == "c1"
+    wire = busy.value.to_wire()
+    assert wire["full_slot"] == "mic"
+    assert "backend" not in wire
+    assert wire["holder"] == {"pid": 41230, "client_label": "Scribbly", "kind": "mic"}
     with pytest.raises(StartRefused) as active:
         await h.start(A)
     assert active.value.code == "session_active"
+    assert active.value.to_wire().keys() == {"slot"}
     session = h.slot.session_of("c1")
     assert session is not None
     assert session.state == "running"
@@ -276,6 +328,7 @@ async def test_start_failing_after_the_holder_stopped_leaves_the_slot_idle() -> 
         await h.start(B, maker=h.maker(backend))
     assert h.log[-2:] == [("c1", "evicted"), ("slot", "idle", "")]
     assert not capture.is_open  # every hold released, the reserved one too
+    assert h.on("fake") == []
     await h.start(C)
     assert h.log[-2:] == [("slot", "busy", "c3"), ("c3", "started")]
     session = h.slot.session_of("c3")
@@ -317,6 +370,7 @@ async def test_new_client_gone_during_the_takeover() -> None:
         await takeover
     assert h.log[-2:] == [("c1", "evicted"), ("slot", "idle", "")]
     assert not capture.is_open
+    assert h.on("fake") == []
     await capture.stop()
 
 
@@ -388,3 +442,106 @@ async def test_client_gone_just_as_its_session_started(silent: SpyCapture) -> No
         ("c1", "client_gone"),
         ("slot", "idle", ""),
     ]
+
+
+async def test_a_full_backend_refuses_the_start_and_changes_nothing(silent: SpyCapture) -> None:
+    h = Harness(silent, capacities={"fake": 1})
+    h.occupy()
+    with pytest.raises(StartRefused) as busy:
+        await h.start(A)
+    assert busy.value.code == "busy"
+    wire = busy.value.to_wire()
+    assert wire["full_slot"] == "backend"
+    assert wire["backend"] == "fake"
+    assert wire["holder"] == {"pid": 77, "client_label": "Log", "kind": "mic"}
+    assert h.changes == []
+    assert h.slot.state.state == "idle"
+    assert h.on("fake") == ["c3"]
+
+
+async def test_capacity_two_takes_a_second_session(silent: SpyCapture) -> None:
+    h = Harness(silent)
+    h.occupy()
+    await h.start(A)
+    assert h.on("fake") == ["c3", "c1"]
+    session = h.slot.session_of("c1")
+    assert session is not None
+    await session.stop()
+    assert h.on("fake") == ["c3"]
+
+
+async def test_eviction_frees_the_holders_backend_slot_as_its_session_ends(
+    silent: SpyCapture,
+) -> None:
+    h = Harness(silent, evictable_after_s=0.1, capacities={"fake": 1})
+    await h.start(A)
+    await h.evictable()
+    await h.start(B)
+    assert h.backends_at_end["c1"] == ["c1", "c2"]
+    assert h.on("fake") == ["c2"]
+    assert h.changes[-1].to_wire()["backends"] == h.slot.state.to_wire()["backends"]
+    session = h.slot.session_of("c2")
+    assert session is not None
+    await session.stop()
+
+
+async def test_a_full_backend_elsewhere_leaves_the_evictable_holder_alone(
+    silent: SpyCapture,
+) -> None:
+    h = Harness(silent, evictable_after_s=0.1, capacities={"fake": 1, "other": 1})
+    h.occupy("other")
+    await h.start(A)
+    await h.evictable()
+    with pytest.raises(StartRefused) as busy:
+        await h.start(B, maker=h.maker(OtherFake()))
+    assert busy.value.to_wire()["backend"] == "other"
+    session = h.slot.session_of("c1")
+    assert session is not None
+    assert session.state == "running"
+    assert h.slot.state.state == "evictable"
+    assert h.on("fake") == ["c1"]
+    await session.stop()
+
+
+async def test_client_gone_and_failed_starts_free_the_backend_slot(silent: SpyCapture) -> None:
+    h = Harness(silent, capacities={"fake": 1})
+    await h.start(A)
+    await h.slot.client_gone("c1")
+    assert h.on("fake") == []
+    backend = FakeBackend(open_failures=[OpenFailed("auth", "bad key", retryable=False)])
+    with pytest.raises(OpenFailed):
+        await h.start(B, maker=h.maker(backend))
+    assert h.on("fake") == []
+    await h.start(C)
+    assert h.on("fake") == ["c3"]
+    session = h.slot.session_of("c3")
+    assert session is not None
+    await session.stop()
+
+
+async def test_a_capacity_change_sends_one_slot_event(silent: SpyCapture) -> None:
+    h = Harness(silent)
+    h.capacities = {"fake": 1}
+    h.slot.capacities_changed()
+    h.slot.capacities_changed()
+    [change] = h.changes
+    assert change.to_wire() == {
+        "state": "idle",
+        "backends": {"fake": {"max_sessions": 1, "sessions": []}},
+    }
+
+
+async def test_a_backend_gone_on_reload_keeps_its_sessions_until_they_end(
+    silent: SpyCapture,
+) -> None:
+    h = Harness(silent, capacities={"fake": 1})
+    await h.start(A)
+    h.capacities = {}
+    h.slot.capacities_changed()
+    [usage] = h.slot.state.backends
+    assert (usage.name, usage.max_sessions) == ("fake", 1)
+    assert h.on("fake") == ["c1"]
+    session = h.slot.session_of("c1")
+    assert session is not None
+    await session.stop()
+    assert h.slot.state.to_wire() == {"state": "idle", "backends": {}}

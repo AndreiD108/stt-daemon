@@ -35,6 +35,9 @@ class Setup:
     def to_wire(self) -> dict[str, object]:
         return {"backends": self.backends_wire(), "default_backend": self.default}
 
+    def capacities(self) -> dict[str, int]:
+        return {name: b.max_sessions for name, b in self.backends.items()}
+
     def backends_wire(self) -> list[dict[str, object]]:
         return [
             {

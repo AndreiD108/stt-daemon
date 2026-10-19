@@ -6,6 +6,7 @@ from typing import Literal
 from .transcript import Segment
 
 type EndReason = Literal["stopped", "cancelled", "evicted", "client_gone", "error"]
+type SessionKind = Literal["mic"]
 
 
 @dataclass(frozen=True)
@@ -16,6 +17,7 @@ class SessionStarted:
     started_at: int
     """Epoch ms (UTC) of the session's first sample."""
     previous_text: str | None
+    kind: SessionKind = "mic"
 
 
 @dataclass(frozen=True)

@@ -25,6 +25,7 @@ def session_event(
                 "client_id": client.client_id,
                 "client_label": client.label,
                 "session_label": session_label,
+                "kind": event.kind,
                 "backend": event.backend,
                 "language": event.language,
                 "started_at": event.started_at,

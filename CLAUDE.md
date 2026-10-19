@@ -38,13 +38,14 @@ src/                      package source
       fake.py             FakeBackend for tests: scripted replies, partials, delays, failures, warnings, time limit
       parakeet.py         local Parakeet TDT on sherpa-onnx: one cached recognizer, decode per commit, token → word times
       install.py          `backend install parakeet`: download, SHA-256 check, unpack, bpe.vocab from tokens.txt
-    server/               the socket side: connections, commands, the session slot, event routing
+    server/               the socket side: connections, commands, mic and backend slots, event routing
       __init__.py         empty package marker
       socket.py           Server: socket file, hello gate, per-connection command order, routing, reload, shutdown
       messages.py         JSONL envelope; per-command field checks → bad_request / invalid naming the field
       wire.py             session and VAD events → protocol event data (words, after_word only when asked)
       backend_set.py      Setup: backends set up here, default; resolve a start (language, features, hints)
-      slot.py             Slot: idle/busy/evictable, sticky evictable timer, takeover order, slot changes
+      slot.py             Slot: mic slot idle/busy/evictable, sticky evictable timer, takeover order, two-step take, slot changes
+      backend_slots.py    BackendSlots: per-backend max_sessions and the sessions holding them
       speech.py           SpeechWatch: daemon-wide VAD on all mic audio; VAD events, speech starts by id
       peer.py             socket peer's pid and cmdline: SO_PEERCRED + /proc; macOS LOCAL_PEERPID + KERN_PROCARGS2
     session/              one session: capture → VAD → pause cutting → backend → segments

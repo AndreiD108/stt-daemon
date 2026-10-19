@@ -11,7 +11,7 @@ from typing import Self
 import numpy as np
 
 from ..audio.frames import Samples
-from ..config import Config
+from ..config import DEFAULT_MAX_SESSIONS, Config
 from ..credentials import Credentials
 from .base import (
     SAMPLE_RATE,
@@ -70,8 +70,10 @@ class FakeBackend(Backend):
         open_delay_s: float = 0.0,
         send_delay_s: float = 0.0,
         answer_on_close: bool = False,
+        max_sessions: int = DEFAULT_MAX_SESSIONS,
     ) -> None:
         self.capabilities = capabilities
+        self.capacity = max_sessions
         self.replies: collections.deque[FakeReply] = collections.deque(
             r if isinstance(r, FakeReply) else FakeReply(text=r) for r in replies
         )
@@ -85,6 +87,10 @@ class FakeBackend(Backend):
         self.open_calls = 0
         self.connections: list[FakeConnection] = []
         self._partial_index = 0
+
+    @property
+    def max_sessions(self) -> int:
+        return self.capacity
 
     @classmethod
     def create(cls, config: Config, credentials: Credentials) -> Self:

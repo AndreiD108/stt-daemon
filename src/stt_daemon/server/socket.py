@@ -120,6 +120,7 @@ class Server:
             evictable_after_s=config.slot.evictable_after_s,
             on_change=self._slot_changed,
             on_event=self._session_event,
+            capacities=lambda: self.setup.capacities(),
         )
         self._buffer_ms = config.audio.buffer_ms
         self._speech = SpeechWatch(
@@ -323,14 +324,15 @@ class Server:
                 requested_at=arrived,
             )
         except StartRefused as exc:
-            next_step = (
-                "wait for a slot event with state idle or evictable"
-                if exc.code == "busy"
-                else "stop it first"
-            )
-            raise RequestError(
-                exc.code, f"{exc.message}; {next_step}", slot=exc.slot.to_wire()
-            ) from None
+            if exc.full_slot == "mic":
+                next_step = "wait for a slot event with state idle or evictable"
+            elif exc.full_slot == "backend":
+                next_step = (
+                    f"wait for a slot event with room on {exc.backend}, or use another backend"
+                )
+            else:
+                next_step = "stop it first"
+            raise RequestError(exc.code, f"{exc.message}; {next_step}", **exc.to_wire()) from None
         except ClientGone:
             pass
         except CaptureUnavailable as exc:
@@ -385,6 +387,7 @@ class Server:
         for other in self._welcomed.values():
             if other is not conn:
                 other.send("backends", data)
+        self._slot.capacities_changed()
 
     def _slot_changed(self, state: SlotState) -> None:
         data = state.to_wire()

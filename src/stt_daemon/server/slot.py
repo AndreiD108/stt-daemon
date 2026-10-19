@@ -1,13 +1,14 @@
-"""The one session slot: who may start a session, takeover of an evictable one, slot changes.
+"""The mic slot and the backend slots: who may start a session, takeover of an evictable one,
+slot changes.
 
-The slot sees every event of the sessions it starts (it wraps their `emit`), so `slot` changes go
-out in protocol order: the new holder's `slot` just before its `session_started`, and `idle`
-just after the last `session_ended`.
+A session takes the mic slot and one slot on its backend. The slot sees every event of the
+sessions it starts (it wraps their `emit`), so `slot` changes go out in protocol order: the new
+holder's `slot` just before its `session_started`, and `idle` just after the last `session_ended`.
 """
 
 import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field, replace
 from typing import Literal
 
@@ -16,6 +17,7 @@ from ..audio.frames import Attachment, epoch_ms
 from ..audio.vad import SpeechStarted, VadEvent
 from ..session.events import EvictedBy, SessionEnded, SessionEvent, SessionStarted
 from ..session.session import Session, start_point
+from .backend_slots import BackendSession, BackendSlots, BackendUsage, usage_to_wire
 from .peer import Peer
 
 type StateName = Literal["idle", "busy", "evictable"]
@@ -44,26 +46,56 @@ class Holder:
 
 @dataclass(frozen=True)
 class SlotState:
+    """The mic slot's `state` and `holder`, and every backend's slots."""
+
     state: StateName
     holder: Holder | None = None
+    backends: tuple[BackendUsage, ...] = ()
 
     def to_wire(self) -> dict[str, object]:
-        if self.holder is None:
-            return {"state": self.state}
-        holder = asdict(self.holder)
-        if self.holder.cmdline is not None:
-            holder["cmdline"] = list(self.holder.cmdline)
-        return {"state": self.state, "holder": holder}
+        data: dict[str, object] = {"state": self.state}
+        if self.holder is not None:
+            holder = asdict(self.holder)
+            if self.holder.cmdline is not None:
+                holder["cmdline"] = list(self.holder.cmdline)
+            data["holder"] = holder
+        data["backends"] = usage_to_wire(self.backends)
+        return data
 
 
 class StartRefused(Exception):
-    """`busy` or `session_active`; `slot` is the slot at the time."""
+    """`busy` or `session_active`; `slot` is the slot at the time. A `busy` names the slot that
+    is full (`full_slot`), its backend for a backend slot, and the session in the way."""
 
-    def __init__(self, code: Literal["busy", "session_active"], message: str, slot: SlotState):
+    def __init__(
+        self,
+        code: Literal["busy", "session_active"],
+        message: str,
+        slot: SlotState,
+        *,
+        full_slot: Literal["mic", "backend"] | None = None,
+        backend: str | None = None,
+        blocker: BackendSession | None = None,
+    ):
         super().__init__(message)
         self.code = code
         self.message = message
         self.slot = slot
+        self.full_slot = full_slot
+        self.backend = backend
+        self.blocker = blocker
+
+    def to_wire(self) -> dict[str, object]:
+        """The `error` data next to `code` and `message`."""
+        data: dict[str, object] = {"slot": self.slot.to_wire()}
+        if self.full_slot is not None:
+            data["full_slot"] = self.full_slot
+        if self.backend is not None:
+            data["backend"] = self.backend
+        if self.blocker is not None:
+            b = self.blocker
+            data["holder"] = {"pid": b.pid, "client_label": b.client_label, "kind": b.kind}
+        return data
 
 
 class ClientGone(Exception):
@@ -82,6 +114,8 @@ class _Claim:
     evicted_by: EvictedBy | None = None
     watch: asyncio.Task[None] | None = None
     opening: asyncio.Future[SessionStarted] | None = None
+    place: BackendSession | None = None
+    """Its slot on the session's backend."""
 
 
 class Slot:
@@ -93,7 +127,9 @@ class Slot:
         evictable_after_s: float,
         on_change: Callable[[SlotState], None],
         on_event: Callable[[Client, SessionEvent], None],
+        capacities: Callable[[], Mapping[str, int]],
     ) -> None:
+        """`capacities`: the backends set up now and their `max_sessions`."""
         self._capture = capture
         self._pre_start_ms = pre_start_ms
         self._evictable_after_s = evictable_after_s
@@ -103,16 +139,23 @@ class Slot:
         self._incoming: _Claim | None = None
         """A takeover's new client while the holder stops."""
         self._previous_end: float | None = None
-        self._announced: tuple[StateName, str | None, str | None] = ("idle", None, None)
+        self.backends = BackendSlots(capacities)
+        self._announced = _change_key(SlotState("idle", backends=self.backends.usage()))
         self._speaking = False
         self._last_speech: float | None = None
 
     @property
     def state(self) -> SlotState:
         claim = self._incoming or self._holder
+        backends = self.backends.usage()
         if claim is None:
-            return SlotState("idle")
-        return SlotState("evictable" if claim.evictable else "busy", self._holder_info(claim))
+            return SlotState("idle", backends=backends)
+        state: StateName = "evictable" if claim.evictable else "busy"
+        return SlotState(state, self._holder_info(claim), backends)
+
+    def capacities_changed(self) -> None:
+        """After a reload: backends or their `max_sessions` may differ."""
+        self._announce()
 
     def heard(self, event: VadEvent) -> None:
         """A daemon-wide VAD event; feeds `last_speech_at` and the evictable timer."""
@@ -152,10 +195,36 @@ class Slot:
         if self._claim_of(client.client_id) is not None:
             raise StartRefused("session_active", "this client already holds a session", self.state)
         holder = self._holder
-        if self._incoming is not None or (holder is not None and not holder.evictable):
-            raise StartRefused("busy", "another client holds the session slot", self.state)
+        if blocking := self._incoming or (holder if holder and not holder.evictable else None):
+            raise StartRefused(
+                "busy",
+                "another client holds the mic slot",
+                self.state,
+                full_slot="mic",
+                blocker=blocking.place,
+            )
         claim = _Claim(client, session_label)
-        claim.session = make_session(self._forward(claim))
+        session = claim.session = make_session(self._forward(claim))
+        backend = session.backend_name
+        blocker = self.backends.full(backend, leaving=holder.place if holder else None)
+        if blocker is not None:
+            raise StartRefused(
+                "busy",
+                f"{backend} already runs as many sessions as its max_sessions allows",
+                self.state,
+                full_slot="backend",
+                backend=backend,
+                blocker=blocker,
+            )
+        claim.place = BackendSession(
+            session.session_id,
+            session.kind,
+            backend,
+            client.client_id,
+            client.peer.pid,
+            client.label,
+        )
+        self.backends.take(claim.place)
         if since is None:
             since = start_point(requested_at, self._pre_start_ms, self._previous_end)
         if holder is None:
@@ -264,11 +333,12 @@ class Slot:
     def _ended(self, claim: _Claim) -> None:
         if claim.watch is not None:
             claim.watch.cancel()
+        self._release(claim)
         if self._holder is claim:
             assert claim.session is not None
             self._holder = None
             self._previous_end = claim.session.audio_end
-            self._announce()
+        self._announce()
 
     def _drop(self, claim: _Claim) -> None:
         """A start that failed or was abandoned: the slot goes back to what is running."""
@@ -276,7 +346,12 @@ class Slot:
             self._incoming = None
         if self._holder is claim:
             self._holder = None
+        self._release(claim)
         self._announce()
+
+    def _release(self, claim: _Claim) -> None:
+        if claim.place is not None:
+            self.backends.release(claim.place)
 
     def _announce(self) -> None:
         holder = self._holder
@@ -285,8 +360,7 @@ class Slot:
         if holder is not None and holder.started_at is None:
             return
         state = self.state
-        held = state.holder
-        key = (state.state, held and held.client_id, held and held.session_id)
+        key = _change_key(state)
         if key != self._announced:
             self._announced = key
             self._on_change(state)
@@ -331,3 +405,12 @@ class Slot:
             since=claim.started_at,
             last_speech_at=None if last is None else epoch_ms(last),
         )
+
+
+def _change_key(state: SlotState) -> object:
+    """What a `slot` event is sent for: not `last_speech_at`, which moves on its own."""
+    held = state.holder
+    backends = tuple(
+        (u.name, u.max_sessions, tuple(s.session_id for s in u.sessions)) for u in state.backends
+    )
+    return (state.state, held and held.client_id, held and held.session_id, backends)

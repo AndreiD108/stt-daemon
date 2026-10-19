@@ -20,7 +20,15 @@ from ..audio.frames import Attachment, Frame, epoch_ms
 from ..audio.vad import WINDOW, SpeechEnded, StreamingVAD
 from ..backends.base import Backend, CommitPolicy, Committed, OpenOptions
 from ..config import Config
-from .events import EndReason, PartialText, SessionEnded, SessionError, SessionEvent, SessionStarted
+from .events import (
+    EndReason,
+    PartialText,
+    SessionEnded,
+    SessionError,
+    SessionEvent,
+    SessionKind,
+    SessionStarted,
+)
 from .markers import MarkerQueue, TimedWord, place
 from .pause_gate import Outgoing, PauseGate
 from .recovery import Link
@@ -64,8 +72,10 @@ class Session:
         backend: Backend,
         options: SessionOptions,
         emit: Callable[[SessionEvent], None],
+        kind: SessionKind = "mic",
     ) -> None:
         self.session_id = uuid.uuid4().hex
+        self.kind: SessionKind = kind
         self.started: SessionStarted | None = None
         self.audio_end = 0.0
         """Monotonic end of the last captured audio the session took in."""
@@ -103,6 +113,10 @@ class Session:
     @property
     def state(self) -> State:
         return self._state
+
+    @property
+    def backend_name(self) -> str:
+        return self._backend.name
 
     async def start(
         self, *, since: float | None = None, attachment: Attachment | None = None
@@ -148,6 +162,7 @@ class Session:
             self._options.open.language,
             started_at,
             self._options.open.previous_text,
+            self.kind,
         )
         self._state = "running"
         self._last_commit_at = time.monotonic()

@@ -178,6 +178,10 @@ class ParakeetBackend(Backend):
     def __repr__(self) -> str:
         return f"ParakeetBackend(model={str(self._model)!r})"
 
+    @property
+    def max_sessions(self) -> int:
+        return self._config.max_sessions
+
     @classmethod
     def create(cls, config: Config, credentials: Credentials) -> Self:
         model = model_dir()

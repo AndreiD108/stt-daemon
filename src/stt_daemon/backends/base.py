@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import ClassVar, Self
 
 from ..audio.frames import Samples
-from ..config import Config
+from ..config import DEFAULT_MAX_SESSIONS, Config
 from ..credentials import Credentials
 
 SAMPLE_RATE = 16000
@@ -150,6 +150,11 @@ class Backend(ABC):
     def default_language(self) -> str | None:
         """The language from config used when a session names none; None: no such setting."""
         return None
+
+    @property
+    def max_sessions(self) -> int:
+        """How many sessions may use this backend at once; config `backends.<name>.max_sessions`."""
+        return DEFAULT_MAX_SESSIONS
 
     @classmethod
     @abstractmethod
