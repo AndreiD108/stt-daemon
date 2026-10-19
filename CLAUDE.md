@@ -28,7 +28,9 @@ src/                      package source
       capture.py          CaptureSource base (keep-open vs per-session holds), MicCapture: PortAudio (loaded on first use), watchdog
       wav_capture.py      WavCapture: WAV files in real time, silence between; mic stand-in for tests
       stream_capture.py   ByteStreamCapture: client bytes via ffmpeg (or raw PCM) → frames on audio time, bounded queue
-      pw_capture.py       PwRecordCapture: system audio via pw-record (default output's monitor or one app's stream); restarts, re-attach
+      system_capture.py   SystemCapture: a capture subprocess's s16 stdout → frames; stall/exit loss, restarts, re-attach, moves to an app's new stream
+      pw_capture.py       PwRecordCapture: pw-record on the default output's monitor or one app's stream (Linux)
+      audiotee_capture.py  AudioteeCapture: audiotee on all output or one pid (macOS); permission hint on silence, its JSON error on exit
       aec.py              EchoCanceller: NumPy AEC per 10 ms block; GCC-PHAT delay, PBFDAF filter pair, double-talk guard, residual gain
       aec_builtin.py      BuiltinEchoCancelledMic: mic track through EchoCanceller, system capture as reference, paired by capture time
       aec_pipewire.py     PipewireAec: echo-cancel module per session via pw-cli; EchoCancelledMic: mic track on its source, plain-mic fallback
@@ -56,7 +58,8 @@ src/                      package source
       slot_state.py       Client, Holder, SlotState (wire form), StartRefused (busy / session_active details)
       backend_slots.py    BackendSlots: per-backend max_sessions, the sessions holding them, suspended ones
       speech.py           SpeechWatch: daemon-wide VAD on all mic audio; VAD events, speech starts by id
-      sources.py          SourceScan: pw-dump -m output → playing apps (sources, ids, events), nodes by name; Follow: one app's next stream
+      sources.py          SourceScan base (events, waits, Follow: one app's next stream), PwDumpScan: pw-dump -m → sources, nodes by name; default_scan
+      sources_macos.py    CoreAudioScan: Core Audio process list (polled + listener, PyObjC) → sources by pid, bundle id as binary
       peer.py             socket peer's pid and cmdline: SO_PEERCRED + /proc; macOS LOCAL_PEERPID + KERN_PROCARGS2
     session/              one session: capture → VAD → pause cutting → backend → segments
       __init__.py         empty package marker
@@ -77,8 +80,8 @@ src/                      package source
       __init__.py         empty package marker
       common.py           Runner (injectable for tests), ServiceError, the installed stt-daemon script's path
       systemd.py          unit and limits.conf rendering, ExecStart escaping; install/remove/status/logs
-      launchd.py          macOS agent plist (TMPDIR kept for the socket); launchctl calls
-      preflight.py        PortAudio load check, tools on PATH (ffmpeg, pw-record, pw-dump, pw-cli), echo-cancel module files; install command per distro
+      launchd.py          macOS agent plist (TMPDIR and PATH kept); launchctl calls
+      preflight.py        PortAudio load check, tools on PATH (ffmpeg, pw-record, pw-dump, pw-cli, audiotee), echo-cancel module files; install command per distro
     cli.py                `stt-daemon` entry point: run, service, key set, backend set-default/install, listen, transcribe
     control.py            one blocking request to the running daemon (hello, command, reply); `reload` after key set
     listen.py             `listen`: session client printing events; terminal keys (Enter, marker key, Ctrl-C)
@@ -90,6 +93,7 @@ tests/
   aec_fixture.py          synthetic echo fixture: TTS far end through a synthetic room into TTS near end; writes WAVs
   conftest.py             marks tests/live as `live` (skipped by default); a temp XDG_DATA_HOME per test; `--dump-dir`
   fake_pw_record.py       pw-record stand-in: WAV then silence in real time; exits, stalls, start log, exits when its target goes
+  fake_audiotee.py        audiotee stand-in: its flags, WAV then silence in chunks, JSON stderr; pid not live, exit, stall, silent
   fake_pw_dump.py         pw-dump -m stand-in, and FakePipeWire: the test side that plays and stops streams, adds sources
   fake_pw_cli.py          pw-cli load-module stand-in: announces the echo-cancel source in a FakePipeWire; load error, exit, ignored TERM
   fake_elevenlabs_batch.py  local stand-in for the EL upload API: records multipart fields, scripted answers, hold
@@ -110,6 +114,8 @@ tests/
     test_wav_capture.py   WAV reading, real-time pacing, per-session open
     test_pw_capture.py    system capture with a stand-in: frames, lost/restored, backoff, stall, release, following an app
     test_sources.py       pw-dump parsing on the recording, ids, scan restarts, following an app's next stream, nodes by name
+    test_sources_macos.py  macOS scan on a stand-in Core Audio: names, ids, listener, polling, read failures, follow by bundle id; scan per platform
+    test_audiotee_capture.py  audiotee with a stand-in: command, frames, permission hint, exit error, quiet process kept, new pid followed
     test_aec.py           built-in canceller on synthetic echo: echo drop, near-end kept, delay estimate and change over the search range, bypass, CPU; Parakeet (slow)
     test_aec_builtin.py   built-in canceller as mic track: late-stamped far frames, far gap and restart, mic jump, settle at stop
     test_aec_pipewire.py  echo-cancel module via a pw-cli stand-in: node wait, load errors, kill, plain-mic fallback; mode; install check
@@ -126,7 +132,7 @@ tests/
     test_upload_session.py  upload session: segments per speaker, markers need at, failures, cancel, input cap
     test_recovery.py      link alone: replay tail and pacing, retries, give-up, idle drop, hung send, rollover
     test_recovery_edges.py  close-time ack, unknown provider cuts, final-ack failure, in-flight commit/stop
-    test_session_tracks.py  system sessions: per-track reconnect, capture loss, fatal error on one track
+    test_session_tracks.py  system sessions: per-track reconnect, capture loss, fatal error on one track, mic held before the system capture
     test_session_recovery.py  fixture sessions: word times, markers, give-up, bounded stop during recovery
     test_config.py        paths per OS, defaults, type errors, Parakeet limits, config writer and key removal
     test_credentials.py   mode/owner checks, precedence, writer, stdin parsing, no key in errors
@@ -141,7 +147,7 @@ tests/
     test_parakeet.py      token → word grouping, hotwords, per-commit decoding, failures, model check
     test_parakeet_engine.py  load at open, one recognizer for all, decodes in turn, idle unload, load failure, reload
     test_install.py       bpe.vocab, unpack once, partial model replaced, bad download / archive leaves nothing
-    test_service.py       unit/plist rendering, ExecStart escaping, systemctl calls, remove guard, PortAudio and ffmpeg hints
+    test_service.py       unit/plist rendering, ExecStart escaping, systemctl calls, remove guard, PortAudio, ffmpeg and audiotee hints
   integration/            real daemon over a socket, WAV capture, fake backend
     conftest.py           `daemon` fixture
     harness.py            in-process Server on a temp socket; test clients; fixture helpers
@@ -152,7 +158,7 @@ tests/
     test_daemon_transcribe.py transcribe: ffmpeg and raw PCM, file-time word times, slots beside mic, decoder errors
     test_daemon_batch.py      elevenlabs-batch over the socket: default rule, speakers, refusals, markers, disconnect
     test_daemon_priority.py   transcribe suspended by a dictation: same output as unsuspended; blocked writer stalls no one
-    test_daemon_system.py     system sessions: two tracks interleaved, dictation alongside, suspend/resume, fatal track, tool missing
+    test_daemon_system.py     system sessions on pw-record and audiotee stand-ins: two tracks, dictation alongside, suspend/resume, fatal track, tool missing, pid
     test_daemon_sources.py    sources in welcome and events (opt-in), app sessions, unknown app, re-attach (also while suspended)
     test_daemon_aec.py        mic track on the echo-cancelled source; no module → plain mic, one aec_unavailable; pw-cli ending mid-session; built-in canceller keeps echo out
     test_cli_daemon.py        key set reloads the daemon; listen prints segments, exit codes

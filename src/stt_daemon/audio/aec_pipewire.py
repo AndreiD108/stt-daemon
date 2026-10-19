@@ -16,8 +16,8 @@ from typing import Any, Protocol
 from ..service.preflight import check_pipewire_aec, check_tool
 from .capture import CaptureSource, CaptureUnavailable
 from .frames import Attachment, Frame
-from .pw_capture import RESTART_BACKOFF_S, AppTarget, PwRecordCapture
 from .stream_capture import STDERR_TAIL, ToolMissing
+from .system_capture import RESTART_BACKOFF_S, AppTarget, SystemCapture
 
 log = logging.getLogger(__name__)
 
@@ -227,7 +227,7 @@ class EchoCancelledMic(CaptureSource):
         mic: CaptureSource,
         aec: PipewireAec,
         *,
-        cleaned: Callable[[AppTarget], PwRecordCapture],
+        cleaned: Callable[[AppTarget], SystemCapture],
     ) -> None:
         super().__init__(sample_rate=mic.sample_rate, buffer_ms=1000, keep_open=False)
         self.on_lost: Callable[[str], None] | None = None
@@ -239,7 +239,7 @@ class EchoCancelledMic(CaptureSource):
         self._mic = mic
         self._aec = aec
         self._make_cleaned = cleaned
-        self._cleaned: PwRecordCapture | None = None
+        self._cleaned: SystemCapture | None = None
         self._mic_held = False
         self._feed: Attachment | None = None
         self._forward: asyncio.Task[None] | None = None

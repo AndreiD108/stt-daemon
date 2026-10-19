@@ -11,6 +11,7 @@ from fake_pw_dump import FakePipeWire
 
 from stt_daemon.server.sources import (
     ArraySplitter,
+    PwDumpScan,
     Source,
     SourceAdded,
     SourceEvent,
@@ -113,7 +114,7 @@ async def test_the_scan_follows_the_graph_and_restarts_the_subprocess(tmp_path: 
     graph = FakePipeWire(tmp_path / "pw")
     graph.play("Zoom", binary="zoom")
     log = tmp_path / "starts"
-    scan = SourceScan(
+    scan = PwDumpScan(
         graph.command("--log", str(log), "--exit-after", "0.5"), enabled=True, retry_s=0.2
     )
     events = await scan_events(scan)
@@ -141,7 +142,7 @@ async def test_a_missing_pw_dump_leaves_no_sources_and_logs_once(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.WARNING, "stt_daemon.server.sources")
-    scan = SourceScan(["/nonexistent/pw-dump"], enabled=True, retry_s=0.05)
+    scan = PwDumpScan(["/nonexistent/pw-dump"], enabled=True, retry_s=0.05)
     events = await scan_events(scan)
     await asyncio.sleep(0.3)
     await scan.close()
@@ -153,7 +154,7 @@ async def test_a_missing_pw_dump_leaves_no_sources_and_logs_once(
 async def test_off_linux_the_scan_never_runs(tmp_path: Path) -> None:
     graph = FakePipeWire(tmp_path)
     graph.play("Zoom")
-    scan = SourceScan(graph.command(), enabled=False)
+    scan = PwDumpScan(graph.command(), enabled=False)
     events = await scan_events(scan)
     await asyncio.sleep(0.3)
     await scan.close()
@@ -165,7 +166,7 @@ async def test_following_an_app_moves_to_its_next_stream(tmp_path: Path) -> None
     graph = FakePipeWire(tmp_path)
     first, first_serial = graph.play("Zoom", binary="zoom")
     graph.play("Spotify", binary="spotify")
-    scan = SourceScan(graph.command(), enabled=True)
+    scan = PwDumpScan(graph.command(), enabled=True)
     scan.start()
     try:
         await wait_until(lambda: len(scan.sources()) == 2, timeout=3)
@@ -189,7 +190,7 @@ async def test_following_an_app_moves_to_its_next_stream(tmp_path: Path) -> None
 async def test_an_app_without_a_binary_is_followed_by_name(tmp_path: Path) -> None:
     graph = FakePipeWire(tmp_path)
     first, _ = graph.play("mpv")
-    scan = SourceScan(graph.command(), enabled=True)
+    scan = PwDumpScan(graph.command(), enabled=True)
     scan.start()
     try:
         await wait_until(lambda: len(scan.sources()) == 1, timeout=3)
@@ -207,7 +208,7 @@ async def test_a_node_is_found_by_name_once_it_appears_and_not_listed_as_a_sourc
     tmp_path: Path,
 ) -> None:
     graph = FakePipeWire(tmp_path)
-    scan = SourceScan(graph.command(), enabled=True)
+    scan = PwDumpScan(graph.command(), enabled=True)
     scan.start()
     try:
         waiting = asyncio.create_task(scan.wait_node("stt-daemon-aec-1"))

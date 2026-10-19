@@ -96,14 +96,18 @@ def test_with_a_unit_dir_systemctl_is_never_called(tmp_path: Path) -> None:
     assert run.calls == []
 
 
-def test_plist_runs_the_script_at_load_and_keeps_tmpdir() -> None:
-    raw = render_plist(Path("/bin/stt-daemon"), Path("/logs/stt.log"), {"TMPDIR": "/var/t/"})
+def test_plist_runs_the_script_at_load_and_keeps_tmpdir_and_path() -> None:
+    env = {"TMPDIR": "/var/t/", "PATH": "/opt/homebrew/bin:/usr/bin", "HOME": "/Users/a"}
+    raw = render_plist(Path("/bin/stt-daemon"), Path("/logs/stt.log"), env)
     plist = plistlib.loads(raw)
     assert plist["Label"] == LABEL
     assert plist["ProgramArguments"] == ["/bin/stt-daemon", "run"]
     assert plist["RunAtLoad"] is True
     assert plist["KeepAlive"] is True
-    assert plist["EnvironmentVariables"] == {"TMPDIR": "/var/t/"}
+    assert plist["EnvironmentVariables"] == {
+        "TMPDIR": "/var/t/",
+        "PATH": "/opt/homebrew/bin:/usr/bin",
+    }
 
 
 @pytest.mark.parametrize(
@@ -222,3 +226,14 @@ def test_pw_record_hint_names_the_distro_package(
 def test_pw_record_hint_without_a_known_distro_or_on_macos_names_the_tool(tmp_path: Path) -> None:
     assert "pw-record" in install_hint("linux", tmp_path / "missing", package="pw-record")
     assert "pw-record" in install_hint("darwin", package="pw-record")
+
+
+def test_the_audiotee_hint_names_where_to_build_it_on_any_system(tmp_path: Path) -> None:
+    path = tmp_path / "os-release"
+    path.write_text("ID=debian\n")
+    for hint in (
+        install_hint("darwin", package="audiotee"),
+        install_hint("linux", path, package="audiotee"),
+    ):
+        assert "github.com/makeusabrew/audiotee" in hint
+        assert "14.2" in hint

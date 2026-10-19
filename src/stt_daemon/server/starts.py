@@ -10,9 +10,11 @@ from dataclasses import dataclass
 from ..audio import aec_pipewire
 from ..audio.aec_builtin import BuiltinEchoCancelledMic
 from ..audio.aec_pipewire import EchoCancelledMic, PipewireAec
+from ..audio.audiotee_capture import AudioteeCapture
 from ..audio.capture import CaptureSource, CaptureUnavailable
-from ..audio.pw_capture import AppTarget, PwRecordCapture
+from ..audio.pw_capture import PwRecordCapture
 from ..audio.stream_capture import ByteStreamCapture, ToolMissing, ffmpeg_command
+from ..audio.system_capture import AppTarget, SystemCapture
 from ..backends.base import FileBackend, OpenFailed
 from ..config import Config, echo_cancel_mode
 from ..service.preflight import check_tool
@@ -25,11 +27,16 @@ from .connection import Connection
 from .messages import Message, MessageId, RequestError, parse_start, parse_system, parse_transcribe
 from .slot import AnySession, ClientGone, Slot
 from .slot_state import StartRefused
-from .sources import Source, SourceScan
+from .sources import PwDumpScan, Source, SourceScan
 from .speech import SpeechWatch
 
+SYSTEM_PLATFORMS = ("linux", "darwin")
 
-def system_capture(target: AppTarget | None) -> PwRecordCapture:
+
+def system_capture(target: AppTarget | None, platform: str | None = None) -> SystemCapture:
+    """`audiotee` on macOS, `pw-record` elsewhere."""
+    if (platform or sys.platform) == "darwin":
+        return AudioteeCapture(target=target)
     return PwRecordCapture(target=target)
 
 
@@ -59,7 +66,7 @@ class Starts:
     _contexts: ContextStore
     _slot: Slot
     _speech: SpeechWatch
-    _system_capture: Callable[[AppTarget | None], PwRecordCapture]
+    _system_capture: Callable[[AppTarget | None], SystemCapture]
     _sources: SourceScan
     _aec_command: aec_pipewire.Command
 
@@ -148,7 +155,7 @@ class Starts:
 
     async def _system(self, conn: Connection, message: Message) -> None:
         request = parse_system(message.data)
-        if sys.platform != "linux":
+        if sys.platform not in SYSTEM_PLATFORMS:
             raise RequestError(
                 "unsupported", f"this daemon can't capture system audio on {sys.platform}"
             )
@@ -200,7 +207,7 @@ class Starts:
         mode = echo_cancel_mode(config.audio)
         if mode == "builtin":
             return BuiltinEchoCancelledMic(self.capture, system)
-        if mode != "pipewire":
+        if mode != "pipewire" or not isinstance(self._sources, PwDumpScan):
             return self.capture
         aec = PipewireAec(
             f"stt-daemon-aec-{session_id}", nodes=self._sources, command=self._aec_command

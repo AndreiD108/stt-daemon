@@ -7,7 +7,7 @@ tracks go into one transcript.
 A `transcribe` session reads a `ByteStreamCapture` on audio time: it commits at pauses and at a
 chunk cap instead of on a wall-clock cadence, and its `stop` means the end of input.
 
-A `system` session has a `system` track (a `PwRecordCapture`) and, optionally, a `mic` track on
+A `system` session has a `system` track (a `SystemCapture`) and, optionally, a `mic` track on
 the shared mic or its echo-cancelled copy. A track whose capture stops goes silent and is
 reported; only a backend failure, on either track, ends the session.
 
@@ -26,8 +26,8 @@ from typing import Any, Literal
 from ..audio.aec_pipewire import EchoCancelledMic
 from ..audio.capture import CaptureSource, CaptureUnavailable
 from ..audio.frames import Attachment, epoch_ms
-from ..audio.pw_capture import PwRecordCapture
 from ..audio.stream_capture import ByteStreamCapture, DecodeFailed
+from ..audio.system_capture import SystemCapture
 from ..backends.base import Backend, Committed, OpenFailed
 from ..config import Config
 from .events import (
@@ -140,7 +140,7 @@ class Session:
                     wall_commits=self._stream is None,
                 )
             )
-            if isinstance(source, PwRecordCapture | EchoCancelledMic):
+            if isinstance(source, SystemCapture | EchoCancelledMic):
                 source.on_lost = self._capture_lost(name)
                 source.on_restored = self._capture_restored(name)
             if isinstance(source, EchoCancelledMic):
@@ -172,24 +172,34 @@ class Session:
         """
         if self._state != "new":
             raise RuntimeError("a session starts once")
-        first = self._first
-        if attachment is None:
-            await first.capture.hold()
-            try:
-                attachment = first.capture.attach(since)
-            except BaseException:
-                await first.capture.release()
-                raise
+        first, rest = self._first, self._tracks[1:]
+        # The mic track is held before the system capture starts: the mic is open first.
+        held: list[Track] = []
+        try:
+            for track in rest:
+                await _hold(track.capture)
+                held.append(track)
+            if attachment is None:
+                await first.capture.hold()
+                try:
+                    attachment = first.capture.attach(since)
+                except BaseException:
+                    await first.capture.release()
+                    raise
+        except BaseException:
+            for track in held:
+                await track.capture.release()
+            raise
         origin = attachment.started_at
         first.begin(attachment, origin, self._options.open)
         begun = [first]
         try:
-            for track in self._tracks[1:]:
-                track.begin(await _attach_held(track.capture, origin), origin, self._options.open)
+            for track in rest:
+                track.begin(_attach_from(track.capture, origin), origin, self._options.open)
                 begun.append(track)
             for track in self._tracks:
                 await track.open(self.make_room)
-            if isinstance(first.capture, PwRecordCapture):
+            if isinstance(first.capture, SystemCapture):
                 await first.capture.ready(FIRST_FRAME_WAIT_S)
             if self._start_failure is not None:
                 raise self._start_failure
@@ -199,6 +209,9 @@ class Session:
                 await track.link.close()
                 track.detach()
                 await track.capture.release()
+            for track in rest:
+                if track not in begun:
+                    await track.capture.release()
             raise
         self.started = SessionStarted(
             self.session_id,
@@ -217,7 +230,7 @@ class Session:
             capture = track.capture
             if isinstance(capture, EchoCancelledMic) and capture.unavailable_reason:
                 self._aec_unavailable(track.name)(capture.unavailable_reason)
-            if isinstance(capture, PwRecordCapture | EchoCancelledMic) and capture.lost_reason:
+            if isinstance(capture, SystemCapture | EchoCancelledMic) and capture.lost_reason:
                 self._capture_lost(track.name)(capture.lost_reason)
         return self.started
 
@@ -482,15 +495,18 @@ class Session:
         self._emit(ended)
 
 
-async def _attach_held(capture: CaptureSource, origin: float) -> Attachment:
-    """Hold a shared capture and attach from `origin`; while it recovers, live frames once it
-    is back. Raises `CaptureUnavailable` when it can't open."""
+async def _hold(capture: CaptureSource) -> None:
+    """Hold a shared capture. Raises `CaptureUnavailable` when it can't open."""
     try:
         await capture.hold()
     except CaptureUnavailable:
         raise
     except Exception as exc:
         raise CaptureUnavailable(f"the mic did not open: {exc}") from exc
+
+
+def _attach_from(capture: CaptureSource, origin: float) -> Attachment:
+    """Attach a held capture from `origin`; while it recovers, live frames once it is back."""
     try:
         return capture.attach(origin)
     except CaptureUnavailable:

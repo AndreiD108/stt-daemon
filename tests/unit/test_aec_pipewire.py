@@ -19,7 +19,8 @@ from stt_daemon.audio.aec_pipewire import (
 )
 from stt_daemon.audio.capture import CaptureSource, CaptureUnavailable
 from stt_daemon.audio.frames import Attachment
-from stt_daemon.audio.pw_capture import AppTarget, PwRecordCapture
+from stt_daemon.audio.pw_capture import PwRecordCapture
+from stt_daemon.audio.system_capture import AppTarget
 from stt_daemon.config import AudioConfig, ConfigError, echo_cancel_mode, load_config
 from stt_daemon.service.preflight import check_pipewire_aec
 
@@ -146,7 +147,9 @@ def test_the_load_command_asks_for_monitor_mode_and_names_the_source() -> None:
         ("auto", "darwin", "builtin"),
         ("off", "linux", "off"),
         ("builtin", "linux", "builtin"),
-        ("pipewire", "darwin", "pipewire"),
+        ("pipewire", "linux", "pipewire"),
+        ("pipewire", "darwin", "off"),
+        ("builtin", "darwin", "builtin"),
     ],
 )
 def test_the_mode_resolves_per_platform(value: str, platform: str, mode: str) -> None:

@@ -74,7 +74,7 @@ def _macos_pid(sock: _Sockopts) -> int | None:
     return pid if pid > 0 else None
 
 
-def _macos_cmdline(pid: int) -> tuple[str, ...] | None:
+def macos_cmdline(pid: int) -> tuple[str, ...] | None:
     libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
     mib = (ctypes.c_int * 3)(_CTL_KERN, _KERN_PROCARGS2, pid)
     size = ctypes.c_size_t(0)
@@ -107,5 +107,5 @@ _LOOKUPS: dict[
     str, tuple[Callable[[_Sockopts], int | None], Callable[[int], tuple[str, ...] | None]]
 ] = {
     "linux": (_linux_pid, _linux_cmdline),
-    "darwin": (_macos_pid, _macos_cmdline),
+    "darwin": (_macos_pid, macos_cmdline),
 }

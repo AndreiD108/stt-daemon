@@ -12,7 +12,7 @@ Sessions come in three kinds:
   slot.
 - `system` (`start_system_session`): transcribes what the machine plays and, if asked, the mic
   as a second track. It takes one backend slot and no mic slot, so it runs next to a mic session
-  and is never evictable. Linux only.
+  and is never evictable. Linux and macOS (14.2 or later).
 - `transcribe` (`transcribe`): transcribes audio bytes the client sends, a file in any format
   ffmpeg reads, or raw PCM. It takes one backend slot and no mic slot, so it runs next to a mic
   session and is never evictable. It runs as fast as the audio arrives.
@@ -254,13 +254,19 @@ Markers belong to the session, not to a track. A marker goes into the first segm
 track, with text whose audio reaches `at`. A segment with no text takes it only once every other
 track has passed `at`.
 
-On Linux, the system track is a `pw-record` process (PipeWire's tools). Without it the start fails
-with `tool_unavailable` and the message names the install command. Other platforms answer
-`unsupported`.
+The system track is a capture process: `pw-record` (PipeWire's tools) on Linux, `audiotee` (Core
+Audio process taps) on macOS 14.2 or later. Without it the start fails with `tool_unavailable` and
+the message says how to install it. Other platforms answer `unsupported`.
 
-Only backend failures end the session. When the system audio stops (`pw-record` exits, or sends
-nothing for 3 s), its track goes silent: the client gets `session_error {code: "capture_lost",
-track, fatal: false}`, and the daemon starts `pw-record` again after 1, 2, 4, 8, then every 10 s,
+On macOS, the first system session makes macOS ask for the System Audio Recording permission, for
+the process that runs the daemon: `stt-daemon` when the launchd agent runs it, the terminal app
+when it runs from a terminal. Until it is granted, `audiotee` runs but captures nothing, so the
+session gets `capture_lost` after 3 s, and its message names the setting: System Settings >
+Privacy & Security > Screen & System Audio Recording.
+
+Only backend failures end the session. When the system audio stops (the capture process exits, or
+sends nothing for 3 s), its track goes silent: the client gets `session_error {code:
+"capture_lost", track, fatal: false}`, and the daemon starts it again after 1, 2, 4, 8, then every 10 s,
 until audio comes again: `session_error {code: "capture_restored", track, fatal: false}`. A fatal
 backend error on either track ends the session, with the text of both tracks. `session_started`
 waits up to 2 s for the first system audio; if none comes, `capture_lost` follows it.
@@ -268,7 +274,8 @@ waits up to 2 s for the first system audio; if none comes, `capture_lost` follow
 On Linux, the `mic` track has echo cancellation: PipeWire's echo-cancel module takes what the
 speakers play out of the mic, so the call's other side is not transcribed twice. When the module
 can't be loaded, or stops during the session, the track takes the plain mic and the client gets
-one `session_error {code: "aec_unavailable", track: "mic", fatal: false}`.
+one `session_error {code: "aec_unavailable", track: "mic", fatal: false}`. On macOS, the daemon's
+own echo canceller does the same; it needs nothing installed.
 
 With `app`, the track ends with the application's stream (the app closed, or stopped playing).
 The client gets `capture_lost`, and the daemon does not retry against the gone stream: it waits
@@ -276,13 +283,18 @@ until a source of the same application appears (same `binary`; same `name` when 
 `binary`), captures that stream, and sends `capture_restored`. A new source of that app while the
 session is suspended is picked up the same way; the audio is there on the resume.
 
+On macOS, a source is a process, and with `app` the track captures that process's output. When the
+process stops playing, the track stays on it and gets silence, with no `capture_lost`. When the
+same application plays from another process (same `binary`, the bundle id), the track moves to
+that process. When the capture process exits (the app quit), the track waits as above.
+
 `stop_session` commits both tracks and waits as for a mic session. While suspended for a dictation,
 both tracks keep their audio, and a stop finishes after the resume, as for
 [`stop_session`](#stop_session) after a suspension.
 
 Checks run in this order: field types (`bad_request`), the platform (`unsupported`), `app`
-(`invalid`), this client's session (`session_active`), the backend, language and features, `pw-record`
-(`tool_unavailable`), then room on the backend (`busy`, `full_slot: "backend"`). With `with_mic`,
+(`invalid`), this client's session (`session_active`), the backend, language and features, the
+capture tool (`tool_unavailable`), then room on the backend (`busy`, `full_slot: "backend"`). With `with_mic`,
 a mic that doesn't open gives `mic_unavailable`.
 
 Reply: `session_started` (`kind: "system"`, with `tracks`; with `app`, also `app` and `app_name`),
@@ -434,7 +446,7 @@ sent during a slow start waits for the start; a `ping` doesn't).
   default true). When false, the mic opens at each start: VAD events flow only during sessions,
   sessions start at the command, and each start waits for the device.
 - `sources`: the applications playing audio now; see [Sources](#sources). Always present, `[]`
-  off Linux.
+  off Linux and macOS.
 
 ### `backends`
 
@@ -676,10 +688,10 @@ Codes of `error` replies, and of `session_error` for the backend codes.
 | `no_backend` | `start_session`, `transcribe`, `start_system_session` | No backend set up; the message names `stt-daemon key set elevenlabs` and `stt-daemon backend install parakeet`. |
 | `unknown_backend` | `start_session`, `transcribe`, `start_system_session` | `backend` isn't set up here; pick one from `welcome.backends`. |
 | `unsupported_language` | `start_session`, `transcribe`, `start_system_session` | The backend lacks that language (or the config's default language). |
-| `unsupported` | `start_session`, `transcribe`, `start_system_session` | The backend lacks a requested feature, or doesn't take this session kind (`elevenlabs-batch` with `start_session`), or the platform can't capture system audio (`start_system_session` off Linux). Start without the feature, or on another backend. |
+| `unsupported` | `start_session`, `transcribe`, `start_system_session` | The backend lacks a requested feature, or doesn't take this session kind (`elevenlabs-batch` with `start_session`), or the platform can't capture system audio (`start_system_session` off Linux and macOS). Start without the feature, or on another backend. |
 | `unsupported_option` | `start_session`, `transcribe`, `start_system_session` | The backend lacks an option; `field` names it (`diarize`). Send without it. |
 | `mic_unavailable` | `start_session`, `start_system_session` with `with_mic` | The mic didn't open. |
-| `tool_unavailable` | `transcribe`, `start_system_session` | A program the daemon needs isn't installed; `tool` names it (`ffmpeg`, `pw-record`), the message gives the install command. A `transcribe` with raw 16 kHz mono `pcm` needs none. |
+| `tool_unavailable` | `transcribe`, `start_system_session` | A program the daemon needs isn't installed; `tool` names it (`ffmpeg`, `pw-record`, `audiotee`), the message says how to install it. A `transcribe` with raw 16 kHz mono `pcm` needs none. |
 | `no_session` | `add_marker`, `audio`, `stop_session`, `cancel_session` | No session, or it is already ending. |
 | `session_stopping` | `add_marker` | The session is ending. |
 | `invalid` | `add_marker`, `audio`, `start_system_session` | `marker` missing or blank, `data` not base64 or over 1 MiB, or `app` not a listed source; `field` names the field. |
@@ -745,8 +757,9 @@ on CPU the whole time the mic is open, and it reports speech:
 
 ## Sources
 
-On Linux the daemon watches which applications play audio, through `pw-dump` (PipeWire's tools):
-each playback stream is a source. `welcome.sources` lists them, and clients that sent
+The daemon watches which applications play audio. On Linux it reads `pw-dump` (PipeWire's tools),
+and each playback stream is a source. On macOS it reads Core Audio's process list every 2 s (and
+at once when Core Audio reports a change), and each process whose audio output runs is a source. `welcome.sources` lists them, and clients that sent
 `sources: true` get these events as streams appear and go:
 
 `source_added`:
@@ -767,11 +780,16 @@ each playback stream is a source. `welcome.sources` lists them, and clients that
 - `name`: the application's name, else the stream's node name. `binary`: the program, `null` when
   PipeWire doesn't say. `media_name`: what the stream says it plays (a title, `Playback`); `null`
   when unset.
+- On macOS, `name` is the app's name, else its bundle id, else the process name. `binary` is the
+  bundle id, `null` for a process without one. `media_name` is always `null`. A source goes when
+  its process stops its output, so a paused player goes, and comes back as a new source when it
+  plays again. Output running doesn't mean audible: an app that plays silence is listed.
 - One application can have several sources (a browser can have one per tab that plays). A source
   goes when the app closes its stream, which some apps do when they pause; playing again is then
   a new source.
 - Without `pw-dump`, or while it isn't running, `sources` is empty and no events come; the daemon
-  tries again every 30 s. Off Linux, `sources` is always empty.
+  tries again every 30 s. On macOS, while Core Audio's list can't be read, `sources` is empty.
+  Elsewhere, `sources` is always empty.
 
 ## Observers
 

@@ -17,7 +17,7 @@ from pathlib import Path
 from .. import __version__
 from ..audio import aec_pipewire
 from ..audio.capture import CaptureSource
-from ..audio.pw_capture import AppTarget, PwRecordCapture
+from ..audio.system_capture import AppTarget, SystemCapture
 from ..audio.vad import VadEvent
 from ..config import ConfigError
 from ..credentials import CredentialsError
@@ -39,7 +39,7 @@ from .messages import (
 from .peer import peer_of
 from .slot import Slot
 from .slot_state import Client, SlotState
-from .sources import SourceEvent, SourceScan
+from .sources import SourceEvent, SourceScan, default_scan
 from .speech import SpeechWatch
 from .starts import Running, Starts, system_capture
 
@@ -61,7 +61,7 @@ class Server(Starts):
         capture: CaptureSource,
         setup: Setup,
         reload_setup: Callable[[], Setup],
-        system_capture: Callable[[AppTarget | None], PwRecordCapture] = system_capture,
+        system_capture: Callable[[AppTarget | None], SystemCapture] = system_capture,
         sources: SourceScan | None = None,
         aec_command: aec_pipewire.Command = aec_pipewire.pw_cli_command,
     ) -> None:
@@ -74,7 +74,7 @@ class Server(Starts):
         self.setup = setup
         self._reload_setup = reload_setup
         self._system_capture = system_capture
-        self._sources = sources or SourceScan()
+        self._sources = sources or default_scan()
         self._sources.on_event = self._source_event
         self._aec_command = aec_command
         self._connections: set[Connection] = set()

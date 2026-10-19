@@ -132,10 +132,14 @@ class Config:
 
 
 def echo_cancel_mode(audio: AudioConfig, platform: str | None = None) -> EchoCancel:
-    """`auto` is the PipeWire module on Linux, the built-in canceller elsewhere."""
+    """`auto` is the PipeWire module on Linux, the built-in canceller elsewhere; `pipewire` off
+    Linux is off."""
     platform = sys.platform if platform is None else platform
     if audio.echo_cancel == "auto":
         return "pipewire" if platform == "linux" else "builtin"
+    if audio.echo_cancel == "pipewire" and platform != "linux":
+        log.warning("audio.echo_cancel = pipewire needs Linux; echo cancellation is off")
+        return "off"
     return typing.cast(EchoCancel, audio.echo_cancel)
 
 

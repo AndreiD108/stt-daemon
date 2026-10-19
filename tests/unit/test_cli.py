@@ -272,3 +272,20 @@ def test_service_install_names_ffmpeg_when_missing_and_still_installs(
     assert main(["service", "install", "--unit-dir", str(tmp_path)]) == 0
     assert "ffmpeg is missing. Install it: Y" in capsys.readouterr().out
     assert (tmp_path / "stt-daemon.service").exists()
+
+
+def test_service_install_on_macos_names_a_missing_audiotee(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cli, "check_portaudio", lambda: None)
+
+    def only_audiotee_missing(tool: str) -> str | None:
+        return ffmpeg_missing(tool) if tool == "audiotee" else None
+
+    monkeypatch.setattr(cli, "check_tool", only_audiotee_missing)
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(cli, "daemon_executable", lambda: Path("/tools/bin/stt-daemon"))
+    assert main(["service", "install", "--unit-dir", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "system audio sessions need audiotee: audiotee is missing" in out
+    assert "pw-record" not in out

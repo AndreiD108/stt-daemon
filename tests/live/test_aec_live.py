@@ -19,7 +19,7 @@ from stt_daemon.audio.frames import Frame
 from stt_daemon.audio.pw_capture import PwRecordCapture, pw_record_command
 from stt_daemon.backends.install import is_installed
 from stt_daemon.backends.parakeet import RecognizerKey, load_recognizer, model_dir
-from stt_daemon.server.sources import SourceScan
+from stt_daemon.server.sources import PwDumpScan
 
 MODEL = model_dir()
 """Taken at import, before the test fixtures point the data dir elsewhere."""
@@ -68,7 +68,7 @@ async def play_twice() -> None:
 
 @pytest.mark.skipif(sys.platform != "linux" or shutil.which("pw-cli") is None, reason="PipeWire")
 async def test_the_cleaned_source_hears_the_speakers_at_least_10_db_less_than_the_mic() -> None:
-    scan = SourceScan(enabled=True)
+    scan = PwDumpScan(enabled=True)
     scan.start()
     aec = PipewireAec("stt-daemon-aec-live-test", nodes=scan)
     try:
@@ -168,7 +168,7 @@ async def test_the_built_in_canceller_against_the_pipewire_module_and_none(
     aec_fixture.write(far_wav, fixture.far)
     seconds = fixture.far.size / RATE + 0.5
     mic, system = MicCapture(keep_open=False), PwRecordCapture()
-    scan = SourceScan(enabled=True)
+    scan = PwDumpScan(enabled=True)
     scan.start()
     module = EchoCancelledMic(
         mic,

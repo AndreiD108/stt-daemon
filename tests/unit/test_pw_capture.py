@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from stt_daemon.audio import pw_capture
+from stt_daemon.audio import system_capture
 from stt_daemon.audio.frames import Frame
 from stt_daemon.audio.pw_capture import PwRecordCapture, pw_record_command
 from stt_daemon.audio.stream_capture import ToolMissing
@@ -49,7 +49,7 @@ def record_backoff(monkeypatch: pytest.MonkeyPatch) -> list[float]:
         delays.append(delay)
         return REAL_SLEEP(0.01)
 
-    monkeypatch.setattr(pw_capture.asyncio, "sleep", sleep)
+    monkeypatch.setattr(system_capture.asyncio, "sleep", sleep)
     return delays
 
 

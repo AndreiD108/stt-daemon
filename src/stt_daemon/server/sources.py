@@ -1,4 +1,5 @@
-"""Applications playing audio, from a `pw-dump -m -N` subprocess: sources, their ids, events.
+"""Applications playing audio: sources, their ids, events. On Linux from a `pw-dump -m -N`
+subprocess (here); on macOS from Core Audio (`sources_macos`).
 
 `pw-dump -m` prints the whole registry as one JSON array, then one array per change. A removed
 object comes as `{"id": n, "info": null}`; registry ids are reused, `object.serial` is not.
@@ -188,28 +189,16 @@ def _text(props: Mapping[str, Any], key: str) -> str | None:
 
 
 class SourceScan:
-    """Runs `command` for the daemon's lifetime and keeps the table; restarts it `retry_s` after
-    it exits or can't start (the sources are empty meanwhile). Off Linux it never runs."""
+    """The playing apps and their events, for clients and system tracks. This base lists none;
+    `PwDumpScan` (Linux) and `CoreAudioScan` (macOS) keep them."""
 
-    def __init__(
-        self,
-        command: Sequence[str] = PW_DUMP_COMMAND,
-        *,
-        enabled: bool = sys.platform == "linux",
-        retry_s: float = RETRY_S,
-    ) -> None:
-        self.command = list(command)
+    def __init__(self) -> None:
         self.on_event: Callable[[SourceEvent], None] | None = None
-        self._enabled = enabled
-        self._retry_s = retry_s
-        self._table = SourceTable()
         self._waiters: list[tuple[Callable[[Source], bool], asyncio.Future[Source]]] = []
-        self._node_waiters: list[tuple[str, asyncio.Future[str]]] = []
         self._task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
-        if self._enabled:
-            self._task = asyncio.create_task(self._run())
+        pass
 
     async def close(self) -> None:
         if self._task is not None:
@@ -218,7 +207,7 @@ class SourceScan:
                 await self._task
 
     def sources(self) -> list[Source]:
-        return self._table.sources()
+        return []
 
     def get(self, source_id: str) -> Source | None:
         return next((s for s in self.sources() if s.id == source_id), None)
@@ -240,6 +229,41 @@ class SourceScan:
 
     def follow(self, source: Source) -> "Follow":
         return Follow(self, source)
+
+    def _dispatch(self, events: list[SourceEvent]) -> None:
+        for event in events:
+            if isinstance(event, SourceAdded):
+                for match, future in self._waiters:
+                    if not future.done() and match(event.source):
+                        future.set_result(event.source)
+            if self.on_event is not None:
+                self.on_event(event)
+
+
+class PwDumpScan(SourceScan):
+    """Runs `command` for the daemon's lifetime and keeps the table; restarts it `retry_s` after
+    it exits or can't start (the sources are empty meanwhile). Off Linux it never runs."""
+
+    def __init__(
+        self,
+        command: Sequence[str] = PW_DUMP_COMMAND,
+        *,
+        enabled: bool = sys.platform == "linux",
+        retry_s: float = RETRY_S,
+    ) -> None:
+        super().__init__()
+        self.command = list(command)
+        self._enabled = enabled
+        self._retry_s = retry_s
+        self._table = SourceTable()
+        self._node_waiters: list[tuple[str, asyncio.Future[str]]] = []
+
+    def start(self) -> None:
+        if self._enabled:
+            self._task = asyncio.create_task(self._run())
+
+    def sources(self) -> list[Source]:
+        return self._table.sources()
 
     def node_serial(self, name: str) -> str | None:
         """The serial of the node with this `node.name`, of any media class."""
@@ -311,13 +335,7 @@ class SourceScan:
         for name, future in self._node_waiters:
             if not future.done() and (serial := self.node_serial(name)) is not None:
                 future.set_result(serial)
-        for event in events:
-            if isinstance(event, SourceAdded):
-                for match, future in self._waiters:
-                    if not future.done() and match(event.source):
-                        future.set_result(event.source)
-            if self.on_event is not None:
-                self.on_event(event)
+        super()._dispatch(events)
 
 
 class Follow:
@@ -350,3 +368,14 @@ class Follow:
         if self._binary is not None:
             return source.binary == self._binary
         return source.name == self._name
+
+
+def default_scan() -> SourceScan:
+    """The platform's scan: `pw-dump` on Linux, Core Audio on macOS, none elsewhere."""
+    if sys.platform == "linux":
+        return PwDumpScan()
+    if sys.platform == "darwin":
+        from .sources_macos import CoreAudioScan
+
+        return CoreAudioScan()
+    return SourceScan()

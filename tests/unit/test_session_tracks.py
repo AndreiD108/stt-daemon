@@ -9,6 +9,7 @@ import pytest
 from test_session_audio import fake, segments
 
 from stt_daemon.audio.pw_capture import PwRecordCapture
+from stt_daemon.audio.stream_capture import ToolMissing
 from stt_daemon.audio.wav_capture import WavCapture
 from stt_daemon.backends.base import EventSink, OpenFailed, OpenOptions
 from stt_daemon.backends.fake import FakeBackend, FakeConnection, FakeReply
@@ -173,3 +174,53 @@ async def test_a_track_that_fails_for_good_before_the_start_ends_fails_the_start
     assert all(c.ended for c in backend.connections)
     assert not capture.is_open
     assert not mic.is_open  # its hold was released
+
+
+class OrderedMic(WavCapture):
+    def __init__(self, order: list[str]) -> None:
+        super().__init__(FIXTURES / "jargon.wav")
+        self.order = order
+
+    async def hold(self) -> None:
+        self.order.append("mic held")
+        await super().hold()
+
+    async def release(self) -> None:
+        self.order.append("mic released")
+        await super().release()
+
+
+class OrderedSystem(PwRecordCapture):
+    def __init__(self, order: list[str], command: list[str]) -> None:
+        super().__init__(command, stall_s=0.5, backoff_s=(0.1,))
+        self.order = order
+
+    async def hold(self) -> None:
+        self.order.append("system started")
+        await super().hold()
+
+
+async def test_the_mic_is_held_before_the_system_capture_starts() -> None:
+    order: list[str] = []
+    mic = OrderedMic(order)
+    await mic.start()
+    capture = OrderedSystem(order, [sys.executable, str(FAKE_PW_RECORD)])
+    try:
+        session, _events = await system_session(fake([]), capture, mic)
+        await session.stop()
+    finally:
+        await mic.stop()
+    assert order[:2] == ["mic held", "system started"]
+
+
+async def test_a_system_capture_that_cant_start_releases_the_held_mic() -> None:
+    order: list[str] = []
+    mic = OrderedMic(order)
+    await mic.start()
+    capture = OrderedSystem(order, ["/nonexistent/audiotee"])
+    try:
+        with pytest.raises(ToolMissing):
+            await system_session(fake([]), capture, mic)
+    finally:
+        await mic.stop()
+    assert order == ["mic held", "system started", "mic released"]

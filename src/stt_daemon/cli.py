@@ -184,6 +184,8 @@ def _service(args: argparse.Namespace) -> int:
                 problem := check_tool("pw-cli") or check_pipewire_aec()
             ):
                 print(f"echo cancellation on a system session's mic track: {problem}")
+            if sys.platform == "darwin" and (problem := check_tool("audiotee")):
+                print(f"system audio sessions need audiotee: {problem}")
             print(BACKEND_SETUP)
         case "remove":
             removed = manager.remove()

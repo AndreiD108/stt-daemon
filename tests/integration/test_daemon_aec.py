@@ -13,12 +13,13 @@ from fake_pw_dump import FakePipeWire
 from harness import FIXTURE, Harness, Msg, TestClient
 
 from stt_daemon.audio.aec_pipewire import Command, pw_cli_command
-from stt_daemon.audio.pw_capture import AppTarget, PwRecordCapture
+from stt_daemon.audio.pw_capture import PwRecordCapture
+from stt_daemon.audio.system_capture import AppTarget
 from stt_daemon.audio.wav_capture import WavCapture
 from stt_daemon.backends.base import CommitPolicy
 from stt_daemon.backends.fake import FAKE_CAPABILITIES, FakeBackend
 from stt_daemon.config import AudioConfig, Config
-from stt_daemon.server.sources import SourceScan
+from stt_daemon.server.sources import PwDumpScan
 
 FAKE_PW_RECORD = str(Path(__file__).parents[1] / "fake_pw_record.py")
 PAUSES = replace(FAKE_CAPABILITIES, commit_policy=CommitPolicy(at_pauses=True))
@@ -60,7 +61,7 @@ class Setup:
 async def start(
     daemon: Harness, setup: Setup, *options: str, mic: WavCapture | None = None
 ) -> None:
-    sources = SourceScan(setup.graph.command(), enabled=True)
+    sources = PwDumpScan(setup.graph.command(), enabled=True)
     await daemon.start(
         FakeBackend([f"text {i}" for i in range(8)], capabilities=PAUSES),
         capture=mic,

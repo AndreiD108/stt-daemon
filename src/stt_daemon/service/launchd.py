@@ -22,8 +22,10 @@ def render_plist(executable: Path, log_file: Path, env: Mapping[str, str]) -> by
         "StandardErrorPath": str(log_file),
     }
     # The socket lives under $TMPDIR; clients started from a shell must see the same one.
-    if tmpdir := env.get("TMPDIR"):
-        plist["EnvironmentVariables"] = {"TMPDIR": tmpdir}
+    # launchd's own PATH has no Homebrew or user dirs, where ffmpeg and audiotee live.
+    kept = {name: env[name] for name in ("TMPDIR", "PATH") if env.get(name)}
+    if kept:
+        plist["EnvironmentVariables"] = kept
     return plistlib.dumps(plist)
 
 

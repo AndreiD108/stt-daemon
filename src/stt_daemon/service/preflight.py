@@ -48,6 +48,7 @@ _PACKAGES = {
     },
 }
 _PACKAGES["pw-dump"] = _PACKAGES["pw-cli"] = _PACKAGES["pw-record"]
+_PACKAGES["audiotee"] = {}
 _PACKAGES["pipewire-aec"] = {
     "apt": "libpipewire-0.3-modules libspa-0.2-modules",
     "dnf": "pipewire-libs",
@@ -62,6 +63,8 @@ _FALLBACK = {
     "pw-cli": "the PipeWire command-line tools (pw-cli) from your distribution's packages",
     "pipewire-aec": "PipeWire's echo-cancel module and its WebRTC plugin from your distribution's "
     "packages",
+    "audiotee": "build it from https://github.com/makeusabrew/audiotee (macOS 14.2 or later; "
+    "`swift build -c release`) and put .build/release/audiotee on PATH",
 }
 AEC_MODULE_FILE = "libpipewire-module-echo-cancel.so"
 AEC_PLUGIN_FILE = "libspa-aec-webrtc.so"
@@ -156,7 +159,7 @@ def install_hint(
             return _FALLBACK[package]
         return f"{_COMMANDS['brew']} {packages['brew']}"
     for distro in _distro_ids(os_release):
-        if manager := _MANAGERS.get(distro):
+        if (manager := _MANAGERS.get(distro)) and manager in packages:
             return f"{_COMMANDS[manager]} {packages[manager]}"
     return _FALLBACK[package]
 

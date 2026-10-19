@@ -9,10 +9,11 @@ from pathlib import Path
 from fake_pw_dump import FakePipeWire
 from harness import FIXTURE, Harness, TestClient
 
-from stt_daemon.audio.pw_capture import AppTarget, PwRecordCapture
+from stt_daemon.audio.pw_capture import PwRecordCapture
+from stt_daemon.audio.system_capture import AppTarget
 from stt_daemon.backends.base import CommitPolicy
 from stt_daemon.backends.fake import FAKE_CAPABILITIES, FakeBackend
-from stt_daemon.server.sources import SourceScan
+from stt_daemon.server.sources import PwDumpScan
 
 FAKE_PW_RECORD = os.path.join(os.path.dirname(__file__), "..", "fake_pw_record.py")
 
@@ -23,7 +24,7 @@ class Graph:
     def __init__(self, root: Path) -> None:
         self.pw = FakePipeWire(root / "pw")
         self.log = root / "pw-record-starts"
-        self.scan = SourceScan(self.pw.command(), enabled=True)
+        self.scan = PwDumpScan(self.pw.command(), enabled=True)
 
     def capture(self, target: AppTarget | None) -> PwRecordCapture:
         def command(serial: str | None) -> list[str]:

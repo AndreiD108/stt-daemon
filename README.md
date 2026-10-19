@@ -95,12 +95,17 @@ audio or video. Either way, word times count from the start of the file.
 
 ## Transcribe a meeting
 
-On Linux, a client can transcribe what your machine plays, a call or a video, with
+A client can transcribe what your machine plays, a call or a video, with
 `start_system_session`. With `with_mic`, your mic is a second track, so both sides of a call come
 out as one transcript, each line marked `[system]` or `[mic]`. It runs next to your dictation and
-takes no mic slot. It needs `pw-record`, from your distribution's PipeWire tools;
-`stt-daemon service install` names the package when it is missing. The mic track has echo
-cancellation on Linux, so speakers are fine.
+takes no mic slot. The mic track has echo cancellation, so speakers are fine.
+
+- **Linux**: it needs `pw-record`, from your distribution's PipeWire tools;
+  `stt-daemon service install` names the package when it is missing.
+- **macOS** (14.2 or later): it needs [`audiotee`](https://github.com/makeusabrew/audiotee) on
+  your `PATH` when you run `stt-daemon service install` (the agent keeps that `PATH`); build it
+  with `swift build -c release`. The first session makes macOS ask for the
+  System Audio Recording permission for `stt-daemon`; allow it once.
 
 To take one application's audio only, say the call app and not the music next to it, a client
 picks it from the sources the daemon lists (every app that plays audio, with its name) and starts

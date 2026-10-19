@@ -14,7 +14,7 @@ import numpy as np
 
 from stt_daemon.audio import aec_pipewire
 from stt_daemon.audio.capture import CaptureSource
-from stt_daemon.audio.pw_capture import AppTarget, PwRecordCapture
+from stt_daemon.audio.system_capture import AppTarget, SystemCapture
 from stt_daemon.audio.wav_capture import WavCapture
 from stt_daemon.backends.base import Backend, CommitPolicy
 from stt_daemon.backends.fake import FAKE_CAPABILITIES, FakeBackend, FakeReply
@@ -22,7 +22,7 @@ from stt_daemon.config import Config
 from stt_daemon.credentials import Credentials
 from stt_daemon.server.backend_set import Setup, load_setup
 from stt_daemon.server.socket import Server
-from stt_daemon.server.sources import SourceScan
+from stt_daemon.server.sources import PwDumpScan, SourceScan
 from stt_daemon.server.starts import system_capture as real_system_capture
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "two_phrases.wav"
@@ -136,7 +136,7 @@ class Harness:
         capture: CaptureSource | None = None,
         config: Config | None = None,
         backends: dict[str, Backend] | None = None,
-        system_capture: Callable[[AppTarget | None], PwRecordCapture] | None = None,
+        system_capture: Callable[[AppTarget | None], SystemCapture] | None = None,
         sources: SourceScan | None = None,
         aec_command: aec_pipewire.Command | None = None,
     ) -> Server:
@@ -155,7 +155,7 @@ class Harness:
             setup=setup_with(config, backends),
             reload_setup=self._reload,
             system_capture=system_capture or real_system_capture,
-            sources=sources or SourceScan(enabled=False),
+            sources=sources or PwDumpScan(enabled=False),
             aec_command=aec_command or aec_pipewire.pw_cli_command,
         )
         await server.start()
