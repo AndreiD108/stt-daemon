@@ -3,21 +3,26 @@ cadence. A session has one track, or two for system audio (`system` and `mic`), 
 own connection and timeline on the session's clock."""
 
 import asyncio
+import logging
 import time
 from collections.abc import Callable, Coroutine
 from typing import Any, Protocol
 
 import numpy as np
 
-from ..audio.capture import CaptureSource
+from ..audio.capture import CaptureSource, CaptureUnavailable
 from ..audio.frames import Attachment, Frame
+from ..audio.speakers import SpeakerMonitor
 from ..audio.vad import WINDOW, StreamingVAD
-from ..backends.base import Backend, Committed, OpenFailed, OpenOptions
+from ..backends.base import PLAYBACK_LEAD_S, Backend, Committed, OpenFailed, OpenOptions
 from ..config import Config
 from .pause_gate import Outgoing, PauseGate
 from .recovery import Link
+from .reference import PlaybackHistory
 from .segments import Segments
 from .timeline import Timeline
+
+log = logging.getLogger(__name__)
 
 END_OF_AUDIO = Frame(np.zeros(0, dtype=np.float32), 0.0, 16000)
 
@@ -52,9 +57,15 @@ class Track:
         capture: CaptureSource,
         backend: Backend,
         segments: Segments,
+        playback: SpeakerMonitor | None = None,
     ) -> None:
+        """`playback`: the speakers' capture, sent to the backend with each commit."""
         self.name = name
         self.capture = capture
+        self._playback_source = playback
+        self._playback: PlaybackHistory | None = None
+        self._holding = False
+        """`take_playback` took a hold on `_playback_source`."""
         self.segments = segments
         self.audio_end = 0.0
         """Monotonic end of the last captured audio the track took in."""
@@ -97,7 +108,32 @@ class Track:
             on_error=lambda code, message: self._owner.track_error(self, code, message),
             on_fatal=lambda code, message: self._owner.track_fatal(self, code, message),
             speech=self._gate.speech,
+            playback=self._playback,
         )
+
+    async def take_playback(self, origin: float) -> None:
+        """Before `begin`: keep the playback from `origin` on; without it, commits go without
+        a reference."""
+        source = self._playback_source
+        if source is None:
+            return
+        await source.hold()
+        self._holding = True
+        try:
+            attachment = source.attach(origin - PLAYBACK_LEAD_S)
+        except CaptureUnavailable as exc:
+            log.warning("no speaker audio for the echo gate: %s", exc)
+            await self.release_playback()
+            return
+        self._playback = PlaybackHistory(attachment, self.capture.sample_rate)
+
+    async def release_playback(self) -> None:
+        if self._playback is not None:
+            await self._playback.close()
+            self._playback = None
+        if self._holding and self._playback_source is not None:
+            self._holding = False
+            await self._playback_source.release()
 
     async def open(self, make_room: Callable[[], Coroutine[Any, Any, bool]] | None) -> None:
         """Open the link; on `concurrency_limit`, `make_room` may free a provider connection
@@ -188,6 +224,10 @@ class Track:
             self._commit()
         assert self.link is not None
         self.link.tick(speaking=self._vad.speech_id is not None)
+        if self._playback is not None:
+            pending = (self.link.queued_since, self._gate.held_since)
+            oldest = min((t for t in pending if t is not None), default=frame.end)
+            self._playback.forget_before(oldest - PLAYBACK_LEAD_S)
 
     def _queue(self, out: Outgoing) -> None:
         assert self.link is not None

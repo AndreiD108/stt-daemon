@@ -25,6 +25,7 @@ RESTART_BACKOFF_S = (1.0, 2.0, 4.0, 8.0, 10.0)
 READ_BYTES = 6400
 """At most 200 ms of s16 mono at 16 kHz per read."""
 STDERR_WAIT_S = 0.5
+BUFFER_MS = 1000
 
 
 type Command = Callable[[str | None], Sequence[str]]
@@ -59,8 +60,9 @@ class SystemCapture(CaptureSource):
         sample_rate: int = SAMPLE_RATE,
         stall_s: float = STALL_S,
         backoff_s: Sequence[float] = RESTART_BACKOFF_S,
+        buffer_ms: int = BUFFER_MS,
     ) -> None:
-        super().__init__(sample_rate=sample_rate, buffer_ms=1000, keep_open=False)
+        super().__init__(sample_rate=sample_rate, buffer_ms=buffer_ms, keep_open=False)
         if callable(command):
             self._command: Command = command
         else:

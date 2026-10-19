@@ -79,6 +79,34 @@ type BackendEvent = Partial | Committed | Failed | Closed
 type EventSink = Callable[[BackendEvent], None]
 
 
+@dataclass(frozen=True)
+class PlaybackSpan:
+    """What the speakers played around one stretch of a commit's audio that was captured without
+    a break (pauses the session cut out end a stretch)."""
+
+    offset: int
+    """The stretch's first sample in the commit's audio."""
+    samples: int
+    playback: Samples
+    """From `lead` samples before the stretch's capture time to `lookahead` samples after its
+    end, on the mic's clock; silence where the playback capture had nothing."""
+    lead: int
+    lookahead: int
+
+
+PLAYBACK_LEAD_S = 0.8
+"""Playback a span has before its stretch: the echo's longest delay plus its reverb tail."""
+PLAYBACK_LOOKAHEAD_S = 0.1
+"""And after it: playback frames are stamped on arrival, maybe later than the mic's."""
+
+
+@dataclass(frozen=True)
+class Reference:
+    """The playback behind a commit's mic audio, for `Capabilities.playback_reference`."""
+
+    spans: tuple[PlaybackSpan, ...]
+
+
 type PauseSteps = tuple[tuple[float, float], ...]
 
 PAUSE_STEPS: PauseSteps = ((0, 3.5), (8, 1.0), (14, 0.8), (19, 0.6), (23, 0.3), (27, 0.15))
@@ -119,6 +147,8 @@ class Capabilities:
     """Audio replayed onto a new connection goes at a bounded rate; off for local backends."""
     diarize: bool = False
     """Takes `OpenOptions.diarize` and names each word's speaker."""
+    playback_reference: bool = False
+    """Takes a `Reference` with each commit of mic audio."""
 
 
 @dataclass(frozen=True)
@@ -131,6 +161,8 @@ class OpenOptions:
     partials: bool = False
     dictation: bool = False
     """A mic session: on a shared local model its decodes go before other sessions'."""
+    mic: bool = False
+    """The audio comes from the mic (a mic session, or a system session's mic track)."""
     diarize: bool = False
     num_speakers: int | None = None
     """With `diarize`: at most this many speakers."""
@@ -164,8 +196,9 @@ class Connection(ABC):
         """16 kHz mono float32 samples, continuing the audio sent before."""
 
     @abstractmethod
-    async def commit(self) -> int:
-        """Ask for the text of all audio sent since the last commit; returns its commit_id."""
+    async def commit(self, reference: Reference | None = None) -> int:
+        """Ask for the text of all audio sent since the last commit; returns its commit_id.
+        `reference`: with `Capabilities.playback_reference`, what the speakers played then."""
 
     @abstractmethod
     async def close(self) -> None:

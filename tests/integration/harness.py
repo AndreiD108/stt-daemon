@@ -14,6 +14,7 @@ import numpy as np
 
 from stt_daemon.audio import aec_pipewire
 from stt_daemon.audio.capture import CaptureSource
+from stt_daemon.audio.speakers import SpeakerMonitor
 from stt_daemon.audio.system_capture import AppTarget, SystemCapture
 from stt_daemon.audio.wav_capture import WavCapture
 from stt_daemon.backends.base import Backend, CommitPolicy
@@ -145,6 +146,7 @@ class Harness:
         aec_command: aec_pipewire.Command | None = None,
         setup: Setup | None = None,
         reload_setup: Callable[[], Setup] | None = None,
+        speakers: SpeakerMonitor | None = None,
     ) -> Server:
         """Without `sources`, no source scan runs; without `aec_command` or an `echo_cancel`
         mode set in `config`, echo cancellation is off. `setup` replaces `backends`;
@@ -164,6 +166,7 @@ class Harness:
             system_capture=system_capture or real_system_capture,
             sources=sources or PwDumpScan(enabled=False),
             aec_command=aec_command or aec_pipewire.pw_cli_command,
+            speakers=speakers,
         )
         await server.start()
         return server

@@ -16,6 +16,7 @@ from typing import Any, Self
 from ..audio.frames import Samples
 from ..config import Config, ParakeetConfig, data_dir
 from ..credentials import Credentials
+from . import echo_gate
 from .base import (
     PAUSE_STEPS,
     Backend,
@@ -81,6 +82,8 @@ class Recognizer:
         self._score = key.hotwords_score
 
     def decode(self, audio: Samples, terms: Sequence[str]) -> Decoded:
+        if not audio.size:
+            return Decoded("", (), (), ())
         model = self._model
         boost = keyterms(model, list(terms), self._score) if terms else None
         found = beam_search(model, model.encode(audio), boost)
@@ -243,7 +246,9 @@ class ParakeetBackend(Backend):
         self._model = model
         self._engine = engine
         policy = CommitPolicy(pause_steps=PAUSE_STEPS, max_chunk_s=config.max_chunk_seconds)
-        self.capabilities = replace(CAPABILITIES, commit_policy=policy)
+        self.capabilities = replace(
+            CAPABILITIES, commit_policy=policy, playback_reference=config.echo_gate
+        )
 
     def __repr__(self) -> str:
         return f"ParakeetBackend(model={str(self._model)!r})"
@@ -277,6 +282,7 @@ class ParakeetBackend(Backend):
         loading = self._engine.acquire(key, unload_after_s)
         model = self._model
         dictation = options.dictation
+        gated = options.mic and self._config.echo_gate
 
         async def ready() -> None:
             try:
@@ -295,7 +301,7 @@ class ParakeetBackend(Backend):
             return await self._engine.decode(recognizer, audio, terms, first=dictation)
 
         return ParakeetConnection(
-            connection_id, sink, decode, ready=ready, on_end=self._engine.release
+            connection_id, sink, decode, gated=gated, ready=ready, on_end=self._engine.release
         )
 
 
@@ -306,15 +312,27 @@ class ParakeetConnection(ChunkedConnection):
         sink: EventSink,
         decode: Callable[[Samples], Awaitable[Decoded]],
         *,
+        gated: bool = False,
         ready: Callable[[], Awaitable[None]] | None = None,
         on_end: Callable[[], None] | None = None,
     ) -> None:
-        """`ready` raises OpenFailed when the model can't load; `on_end` is called once."""
+        """`gated`: mic audio goes through the echo gate first. `ready` raises OpenFailed when
+        the model can't load; `on_end` is called once."""
 
         async def transcribe(chunk: Chunk) -> Transcribed:
-            decoded = await decode(chunk.audio)
+            if not gated:
+                decoded = await decode(chunk.audio)
+                text = decoded.text.strip()
+                return Transcribed(text, group_words(decoded, chunk.start_s) if text else ())
+            audio, kept = echo_gate.apply(chunk.audio, chunk.reference)
+            decoded = await decode(audio)
             text = decoded.text.strip()
-            return Transcribed(text, group_words(decoded, chunk.start_s) if text else ())
+            words: list[Word] = []
+            for word in group_words(decoded, 0.0) if text else ():
+                start_s, end_s = kept.word_span(word.start_s, word.end_s)
+                at = chunk.start_s
+                words.append(replace(word, start_s=at + start_s, end_s=at + end_s))
+            return Transcribed(text, tuple(words))
 
         super().__init__(
             connection_id, sink, transcribe, label="Parakeet", ready=ready, on_end=on_end

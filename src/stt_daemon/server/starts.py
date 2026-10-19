@@ -13,8 +13,9 @@ from ..audio.aec_pipewire import EchoCancelledMic, PipewireAec
 from ..audio.audiotee_capture import AudioteeCapture
 from ..audio.capture import CaptureSource, CaptureUnavailable
 from ..audio.pw_capture import PwRecordCapture
+from ..audio.speakers import SpeakerMonitor
 from ..audio.stream_capture import ByteStreamCapture, ToolMissing, ffmpeg_command
-from ..audio.system_capture import AppTarget, SystemCapture
+from ..audio.system_capture import BUFFER_MS, AppTarget, SystemCapture
 from ..backends.base import FileBackend, OpenFailed
 from ..config import Config, echo_cancel_mode
 from ..service.preflight import check_tool
@@ -33,11 +34,13 @@ from .speech import SpeechWatch
 SYSTEM_PLATFORMS = ("linux", "darwin")
 
 
-def system_capture(target: AppTarget | None, platform: str | None = None) -> SystemCapture:
+def system_capture(
+    target: AppTarget | None, platform: str | None = None, *, buffer_ms: int = BUFFER_MS
+) -> SystemCapture:
     """`audiotee` on macOS, `pw-record` elsewhere."""
     if (platform or sys.platform) == "darwin":
-        return AudioteeCapture(target=target)
-    return PwRecordCapture(target=target)
+        return AudioteeCapture(target=target, buffer_ms=buffer_ms)
+    return PwRecordCapture(target=target, buffer_ms=buffer_ms)
 
 
 @dataclass(eq=False)
@@ -67,6 +70,7 @@ class Starts:
     _slot: Slot
     _speech: SpeechWatch
     _system_capture: Callable[[AppTarget | None], SystemCapture]
+    _speakers: SpeakerMonitor | None
     _sources: SourceScan
     _aec_command: aec_pipewire.Command
 
@@ -94,6 +98,7 @@ class Starts:
                 backend=resolved.backend,
                 options=resolved.options,
                 emit=emit,
+                playback=self._speakers,
             )
             self._running[cid] = Running(
                 conn, session, request.label, resolved.context_key, message.id
@@ -189,6 +194,7 @@ class Starts:
                 mic=self._mic_track(setup.config, session_id, capture)
                 if request.with_mic
                 else None,
+                playback=self._speakers,
                 session_id=session_id,
             )
             self._running[cid] = Running(

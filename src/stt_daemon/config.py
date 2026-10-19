@@ -103,6 +103,9 @@ class ParakeetConfig:
     """Audio sent without a pause is committed once it reaches this length."""
     unload_after_minutes: float = 10.0
     """The model leaves memory this long after the last Parakeet session; 0 keeps it."""
+    echo_gate: bool = True
+    """Cut mic audio far under the voice level before decoding, harder where it is echo of the
+    speakers (which the daemon then records whenever the mic is open)."""
 
 
 @dataclass

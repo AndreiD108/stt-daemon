@@ -5,7 +5,7 @@ import asyncio
 import pytest
 from test_recovery import Rig, limited, numbers, span, started
 
-from stt_daemon.backends.base import Committed
+from stt_daemon.backends.base import Committed, Reference
 from stt_daemon.backends.fake import FakeBackend, FakeReply
 from stt_daemon.session import recovery
 
@@ -84,10 +84,10 @@ async def test_final_coalesces_with_an_inflight_periodic_commit(
     entered, release = asyncio.Event(), asyncio.Event()
     commit = rig.conn(0).commit
 
-    async def blocked_commit() -> int:
+    async def blocked_commit(reference: Reference | None = None) -> int:
         entered.set()
         await release.wait()
-        return await commit()
+        return await commit(reference)
 
     monkeypatch.setattr(rig.conn(0), "commit", blocked_commit)
     rig.speak(200)

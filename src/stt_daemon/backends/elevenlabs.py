@@ -45,6 +45,7 @@ from .base import (
     OpenFailed,
     OpenOptions,
     Partial,
+    Reference,
     Word,
     merge_keyterms,
     trim_previous_text,
@@ -244,7 +245,7 @@ class ElevenLabsConnection(Connection):
                     )
                     await self._commit(None)
 
-    async def commit(self) -> int:
+    async def commit(self, reference: Reference | None = None) -> int:
         async with self._send_lock:
             commit_id = self._next_commit_id
             self._next_commit_id += 1

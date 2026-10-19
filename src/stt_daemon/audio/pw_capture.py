@@ -4,7 +4,7 @@ stream."""
 from collections.abc import Sequence
 
 from .capture import SAMPLE_RATE
-from .system_capture import RESTART_BACKOFF_S, STALL_S, AppTarget, Command, SystemCapture
+from .system_capture import BUFFER_MS, RESTART_BACKOFF_S, STALL_S, AppTarget, Command, SystemCapture
 
 
 def pw_record_command(target: str | None = None, sample_rate: int = SAMPLE_RATE) -> list[str]:
@@ -29,7 +29,13 @@ class PwRecordCapture(SystemCapture):
         sample_rate: int = SAMPLE_RATE,
         stall_s: float = STALL_S,
         backoff_s: Sequence[float] = RESTART_BACKOFF_S,
+        buffer_ms: int = BUFFER_MS,
     ) -> None:
         super().__init__(
-            command, target=target, sample_rate=sample_rate, stall_s=stall_s, backoff_s=backoff_s
+            command,
+            target=target,
+            sample_rate=sample_rate,
+            stall_s=stall_s,
+            backoff_s=backoff_s,
+            buffer_ms=buffer_ms,
         )

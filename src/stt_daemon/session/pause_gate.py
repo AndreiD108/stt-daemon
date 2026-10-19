@@ -83,6 +83,11 @@ class PauseGate:
                 self._hold(frame)
         return out
 
+    @property
+    def held_since(self) -> float | None:
+        """Start of the oldest audio held back, which may still be sent."""
+        return self._held[0].start if self._held else None
+
     def flush(self) -> list[Outgoing]:
         """Everything still held (a word may have begun that the VAD hasn't confirmed yet)."""
         return self._release(None)

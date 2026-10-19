@@ -12,7 +12,17 @@ from dataclasses import dataclass
 import numpy as np
 
 from ..audio.frames import Samples
-from .base import SAMPLE_RATE, Closed, Committed, Connection, EventSink, Failed, OpenFailed, Word
+from .base import (
+    SAMPLE_RATE,
+    Closed,
+    Committed,
+    Connection,
+    EventSink,
+    Failed,
+    OpenFailed,
+    Reference,
+    Word,
+)
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +36,8 @@ class Chunk:
     start_s: float
     """Seconds from the connection's first audio."""
     end_s: float
+    reference: Reference | None = None
+    """What the speakers played meanwhile, for a backend with `playback_reference`."""
 
 
 @dataclass(frozen=True)
@@ -109,7 +121,7 @@ class ChunkedConnection(Connection):
         self._chunks.append(np.asarray(samples, np.float32).copy())
         self._sent_samples += len(samples)
 
-    async def commit(self) -> int:
+    async def commit(self, reference: Reference | None = None) -> int:
         self._commits += 1
         if self._ended:
             return self._commits
@@ -117,7 +129,7 @@ class ChunkedConnection(Connection):
         self._chunks = []
         start, end = self._committed_samples, self._sent_samples
         self._committed_samples = end
-        chunk = Chunk(audio, start / SAMPLE_RATE, end / SAMPLE_RATE)
+        chunk = Chunk(audio, start / SAMPLE_RATE, end / SAMPLE_RATE, reference)
         self._pending.append((self._commits, chunk))
         self._has_pending.set()
         return self._commits

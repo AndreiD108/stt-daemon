@@ -17,6 +17,7 @@ from pathlib import Path
 from .. import __version__
 from ..audio import aec_pipewire
 from ..audio.capture import CaptureSource
+from ..audio.speakers import SpeakerMonitor
 from ..audio.system_capture import AppTarget, SystemCapture
 from ..audio.vad import VadEvent
 from ..config import ConfigError
@@ -64,6 +65,7 @@ class Server(Starts):
         system_capture: Callable[[AppTarget | None], SystemCapture] = system_capture,
         sources: SourceScan | None = None,
         aec_command: aec_pipewire.Command = aec_pipewire.pw_cli_command,
+        speakers: SpeakerMonitor | None = None,
     ) -> None:
         """`reload_setup` re-reads config and credentials; it raises `ConfigError` or
         `CredentialsError`. `system_capture` makes a `system` session's system track, following
@@ -77,6 +79,9 @@ class Server(Starts):
         self._sources = sources or default_scan()
         self._sources.on_event = self._source_event
         self._aec_command = aec_command
+        self._speakers = speakers
+        """Recorded for backends that take a playback reference; None: never."""
+        self._speakers_change: asyncio.Task[None] | None = None
         self._connections: set[Connection] = set()
         self._welcomed: dict[str, Connection] = {}
         self._handlers: set[asyncio.Task[None]] = set()
@@ -112,6 +117,7 @@ class Server(Starts):
         os.chmod(self.path, 0o600)
         self._speech.start()
         self._sources.start()
+        self._speakers_follow_setup()
         log.info("listening on %s", self.path)
 
     async def close(self) -> None:
@@ -127,6 +133,10 @@ class Server(Starts):
         if workers:
             await asyncio.wait(workers)
         await self._slot.shutdown()
+        if self._speakers is not None:
+            if self._speakers_change is not None:
+                await asyncio.wait([self._speakers_change])
+            await self._speakers.stop()
         for conn in self._connections:
             conn.writer.close()
         if self._handlers:
@@ -326,6 +336,22 @@ class Server(Starts):
             if other is not conn:
                 other.send("backends", data)
         self._slot.capacities_changed()
+        self._speakers_follow_setup()
+
+    def _speakers_follow_setup(self) -> None:
+        """Record the speakers while some backend takes a playback reference."""
+        speakers = self._speakers
+        if speakers is None:
+            return
+        wanted = any(b.capabilities.playback_reference for b in self.setup.backends.values())
+        previous = self._speakers_change
+
+        async def change() -> None:
+            if previous is not None:
+                await asyncio.wait([previous])
+            await speakers.want(wanted)
+
+        self._speakers_change = asyncio.create_task(change())
 
     def _slot_changed(self, state: SlotState) -> None:
         data = state.to_wire()

@@ -23,8 +23,9 @@ from dataclasses import replace
 from typing import Any, Literal
 
 from ..audio.aec_pipewire import EchoCancelledMic
-from ..audio.capture import CaptureSource, CaptureUnavailable
+from ..audio.capture import CaptureSource
 from ..audio.frames import Attachment, epoch_ms
+from ..audio.speakers import SpeakerMonitor
 from ..audio.stream_capture import ByteStreamCapture, DecodeFailed
 from ..audio.system_capture import SystemCapture
 from ..backends.base import Backend, Committed, OpenFailed
@@ -46,6 +47,7 @@ from .markers import MarkerQueue
 from .moving import while_moving
 from .options import MarkerRefused, SessionOptions
 from .segments import Segments
+from .track_start import TrackStart
 from .tracks import Track
 from .transcript import Transcript
 
@@ -74,17 +76,19 @@ class Session:
         emit: Callable[[SessionEvent], None],
         kind: SessionKind = "mic",
         mic: CaptureSource | None = None,
+        playback: SpeakerMonitor | None = None,
         session_id: str | None = None,
     ) -> None:
         """`capture` is the first track's source; `mic` adds a `mic` track to a `system`
-        session."""
+        session. `playback` (the speakers) goes with the mic's audio to a backend that takes a
+        reference."""
         self.session_id = session_id or uuid.uuid4().hex
         self.kind: SessionKind = kind
         self.started: SessionStarted | None = None
         self._config = config
         self._backend = backend
         if kind == "mic":
-            options = replace(options, open=replace(options.open, dictation=True))
+            options = replace(options, open=replace(options.open, dictation=True, mic=True))
         self._options = options
         self._emit = emit
         self._state: State = "new"
@@ -112,6 +116,8 @@ class Session:
         ]
         if mic is not None:
             sources.append(("mic", mic))
+        if not backend.capabilities.playback_reference:
+            playback = None
         markers, transcript = MarkerQueue(), Transcript()
         self._markers = markers
         self._tracks: list[Track] = []
@@ -131,6 +137,7 @@ class Session:
                     capture=source,
                     backend=backend,
                     segments=segments,
+                    playback=playback if kind == "mic" or name == "mic" else None,
                 )
             )
             if isinstance(source, SystemCapture | EchoCancelledMic):
@@ -165,46 +172,18 @@ class Session:
         """
         if self._state != "new":
             raise RuntimeError("a session starts once")
-        first, rest = self._first, self._tracks[1:]
-        # The mic track is held before the system capture starts: the mic is open first.
-        held: list[Track] = []
+        first = self._first
+        opening = TrackStart(self._tracks)
         try:
-            for track in rest:
-                await _hold(track.capture)
-                held.append(track)
-            if attachment is None:
-                await first.capture.hold()
-                try:
-                    attachment = first.capture.attach(since)
-                except BaseException:
-                    await first.capture.release()
-                    raise
-        except BaseException:
-            for track in held:
-                await track.capture.release()
-            raise
-        origin = attachment.started_at
-        first.begin(attachment, origin, self._options.open)
-        begun = [first]
-        try:
-            for track in rest:
-                track.begin(_attach_from(track.capture, origin), origin, self._options.open)
-                begun.append(track)
-            for track in self._tracks:
-                await track.open(self.make_room)
+            origin = await opening.open(
+                self._options.open, self.make_room, since=since, attachment=attachment
+            )
             if isinstance(first.capture, SystemCapture):
                 await first.capture.ready(FIRST_FRAME_WAIT_S)
             if self._start_failure is not None:
                 raise self._start_failure
         except BaseException:
-            for track in begun:
-                assert track.link is not None
-                await track.link.close()
-                track.detach()
-                await track.capture.release()
-            for track in rest:
-                if track not in begun:
-                    await track.capture.release()
+            await opening.undo()
             raise
         self.started = SessionStarted(
             self.session_id,
@@ -475,6 +454,7 @@ class Session:
             self._emit(error)
         for track in self._tracks:
             await track.capture.release()
+            await track.release_playback()
         transcript = self._first.segments.transcript
         ended = SessionEnded(
             reason,
@@ -486,21 +466,3 @@ class Session:
         self._state = "ended"
         self._ended.set_result(ended)
         self._emit(ended)
-
-
-async def _hold(capture: CaptureSource) -> None:
-    """Hold a shared capture. Raises `CaptureUnavailable` when it can't open."""
-    try:
-        await capture.hold()
-    except CaptureUnavailable:
-        raise
-    except Exception as exc:
-        raise CaptureUnavailable(f"the mic did not open: {exc}") from exc
-
-
-def _attach_from(capture: CaptureSource, origin: float) -> Attachment:
-    """Attach a held capture from `origin`; while it recovers, live frames once it is back."""
-    try:
-        return capture.attach(origin)
-    except CaptureUnavailable:
-        return capture.listen()

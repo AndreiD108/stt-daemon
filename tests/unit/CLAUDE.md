@@ -58,6 +58,9 @@ test_transcribe_client.py  `transcribe` CLI vs a scripted daemon: file bytes, te
 test_plugins.py       plugin loader and failures, statuses, config and limits, adapter: chunks, s16le, turns, timeout, options; docs example
 test_cli_plugins.py   backend list, key set / install / set-default by plugin name
 test_parakeet.py      token → word grouping, per-commit decoding, failures, model check
+test_echo_gate.py     echo frames: delayed / early-stamped echo, near speech over it, per-span match; gate thresholds, joints, word times back
+test_playback.py      playback clock, lookahead wait, reference spans; SpeakerMonitor holds vs want, open race, missing tool; replay keeps reference
+test_session_playback.py  mic sessions with playback: reference per commit, none for other backends, quiet stretch trimmed, speakers released
 test_tdt.py           keyterm BPE split; trie scoring: whole, broken, restarted, open at the end, nested
 test_parakeet_engine.py  load at open, one recognizer for all, decodes in turn, idle unload, load failure, reload
 test_install.py       unpack once, partial model replaced, bad download / archive leaves nothing

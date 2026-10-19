@@ -26,6 +26,7 @@ from .base import (
     OpenFailed,
     OpenOptions,
     Partial,
+    Reference,
     Word,
 )
 
@@ -154,6 +155,8 @@ class FakeConnection(Connection):
         self.options = options
         self.chunks: list[Samples] = []
         self.commit_ids: list[int] = []
+        self.references: list[Reference | None] = []
+        """What each commit was given."""
         self.commit_spans: list[tuple[float, float]] = []
         """(start_s, end_s) of the audio each commit covered, while the connection lived."""
         self.ended = False
@@ -191,9 +194,10 @@ class FakeConnection(Connection):
         if self.options.partials and (text := self._backend.take_partial()) is not None:
             self._sink(Partial(self.connection_id, text))
 
-    async def commit(self) -> int:
+    async def commit(self, reference: Reference | None = None) -> int:
         commit_id = len(self.commit_ids) + 1
         self.commit_ids.append(commit_id)
+        self.references.append(reference)
         if self.ended:
             return commit_id
         start, end = self._committed_samples, self._sent_samples

@@ -8,14 +8,19 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from .audio.capture import CaptureSource, MicCapture
+from .audio.speakers import SpeakerMonitor
 from .backends import parakeet
 from .config import Config, ConfigError, load_config, socket_path
 from .credentials import CredentialsError, load_credentials
 from .server.backend_set import Setup, installed_plugins, load_setup
 from .server.connection import SocketInUse
 from .server.socket import Server
+from .server.starts import system_capture
 
 log = logging.getLogger(__name__)
+
+SPEAKERS_EXTRA_MS = 1000
+"""The speakers' ring holds this much more than the mic's: the echo gate's look back."""
 
 
 class StartupFailed(Exception):
@@ -29,6 +34,7 @@ async def serve(
     setup: Setup,
     reload_setup: Callable[[], Setup],
     stop: asyncio.Event,
+    speakers: SpeakerMonitor | None = None,
 ) -> None:
     """Runs until `stop` is set. Raises `StartupFailed` or `SocketInUse`."""
     try:
@@ -36,7 +42,9 @@ async def serve(
     except Exception as exc:
         raise StartupFailed(f"the mic did not open: {exc}") from exc
     try:
-        server = Server(path=path, capture=capture, setup=setup, reload_setup=reload_setup)
+        server = Server(
+            path=path, capture=capture, setup=setup, reload_setup=reload_setup, speakers=speakers
+        )
         await server.start()
         try:
             await stop.wait()
@@ -82,15 +90,24 @@ def run(stdin_keys: Mapping[str, str] | None = None, *, config_file: Path | None
         buffer_ms=config.audio.buffer_ms,
         keep_open=config.audio.keep_mic_open,
     )
+    speakers = SpeakerMonitor(
+        lambda: system_capture(None, buffer_ms=config.audio.buffer_ms + SPEAKERS_EXTRA_MS),
+        keep_open=config.audio.keep_mic_open,
+    )
     try:
-        asyncio.run(_main(capture, setup, reload_setup))
+        asyncio.run(_main(capture, speakers, setup, reload_setup))
     except (StartupFailed, SocketInUse) as exc:
         print(f"stt-daemon: {exc}", file=sys.stderr)
         return 1
     return 0
 
 
-async def _main(capture: CaptureSource, setup: Setup, reload_setup: Callable[[], Setup]) -> None:
+async def _main(
+    capture: CaptureSource,
+    speakers: SpeakerMonitor,
+    setup: Setup,
+    reload_setup: Callable[[], Setup],
+) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGTERM, signal.SIGINT):
@@ -101,4 +118,5 @@ async def _main(capture: CaptureSource, setup: Setup, reload_setup: Callable[[],
         setup=setup,
         reload_setup=reload_setup,
         stop=stop,
+        speakers=speakers,
     )

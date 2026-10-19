@@ -650,6 +650,18 @@ session, `track` names the track, and a partial replaces only that track's previ
   13 minutes). Parakeet sessions share one model and take turns to transcribe, so a commit can
   wait for another session's.
 
+  On Parakeet, mic audio goes through a level gate before it is transcribed. In each commit's
+  audio, sound 35 dB or more under the voice is cut (10 dB before the first loud part); sound
+  that is echo of what the speakers played is cut from 25 dB under (6 dB before the first loud
+  part). This keeps most background talk and leftover echo out of the text; word times still
+  point into the session's audio. The gate does not replace echo cancellation: a
+  commit with only echo in it is transcribed. To tell echo, the daemon records the speakers
+  (`pw-record` on Linux, `audiotee` on macOS, with the same permission as
+  [`start_system_session`](#start_system_session)) while the mic is open: from daemon start with
+  `audio.keep_mic_open`, else during each session. A commit waits up to 0.4 s for the speakers'
+  audio of its last moments. Config `backends.parakeet.echo_gate = false` turns the gate off; the
+  speakers are then not recorded once running sessions end.
+
 ### `progress`
 
 ```json

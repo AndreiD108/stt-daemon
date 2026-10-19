@@ -32,6 +32,7 @@ src/                      package source
       stream_capture.py   ByteStreamCapture: client bytes via ffmpeg (or raw PCM) → frames on audio time, bounded queue
       system_capture.py   SystemCapture: a capture subprocess's s16 stdout → frames; stall/exit loss, restarts, re-attach, follows an app
       pw_capture.py       PwRecordCapture: pw-record on the default output's monitor or one app's stream (Linux)
+      speakers.py         SpeakerMonitor: the speakers recorded for the echo gate, kept open with the mic or held per session
       audiotee_capture.py  AudioteeCapture: audiotee on all output or one pid (macOS); permission hint on silence, its JSON error on exit
       aec.py              EchoCanceller: NumPy AEC per 10 ms block; GCC-PHAT delay, PBFDAF filter pair, double-talk guard, residual gain
       aec_builtin.py      BuiltinEchoCancelledMic: mic track through EchoCanceller, system capture as reference, paired by capture time
@@ -50,6 +51,7 @@ src/                      package source
       parakeet.py         local Parakeet TDT on `tdt`: shared recognizer (load at open, decodes in turn, idle unload), token → word times
       plugins.py          plugin files: import by path, checks, setup per load, limits; PluginBackend on the chunked connection, 120 s timeout
       tdt.py              Parakeet TDT on onnxruntime: sherpa-matched features, frame-bucketed beam search, keyterm trie boost
+      echo_gate.py        level gate before Parakeet decoding: echo frames from playback (25/6 dB), others 35/10; word times mapped back
       install.py          `backend install parakeet`: download, SHA-256 check, unpack
     server/               the socket side: connections, commands, mic and backend slots, event routing
       __init__.py         empty package marker
@@ -69,11 +71,13 @@ src/                      package source
     session/              one session: capture → VAD → pause cutting → backend → segments
       __init__.py         empty package marker
       session.py          Session: one or two tracks; start, stop (bounded) / cancel / error end, suspend / resume, capture loss
+      track_start.py      TrackStart: holds captures, attaches on one origin, takes playback, opens links; undo on failure
       tracks.py           Track: one source's VAD → pause gate → link, commits by pause length and audio sent, audio loop
       upload.py           UploadSession: transcribe on a file backend; bytes kept, one upload at stop, no progress
       options.py          SessionOptions, MarkerRefused, start_point (where a started session takes its audio from)
       recovery.py         Link: unanswered-audio log, in-order sends, rollover, reconnect, paced replay, suspend / resume, text-only word times
-      link_log.py         the link's log items: audio (int16 while suspended), commit points
+      reference.py        PlaybackHistory on one clock, waits for lookahead; a commit's Reference: playback per stretch captured without a break
+      link_log.py         LinkLog: unanswered audio (int16 while suspended) and commit points; sends, answers, drops
       segments.py         backend answers → segments: session times via timeline, markers placed, leftover markers
       moving.py           while_moving: wait bounded by no progress, paused time not counted
       events.py           what a session emits: started, partial, error, ended (+ evicted_by); segments from transcript
@@ -133,6 +137,7 @@ tests/
     test_daemon_aec.py        mic track on the echo-cancelled source; no module → plain mic, one aec_unavailable; pw-cli exit; built-in AEC
     test_cli_daemon.py        key set reloads the daemon; listen prints segments, exit codes
     test_parakeet_daemon.py   `slow`, real model: commits at pauses, word times at speech edges, estimate vs real times, keyterms, two tracks
+    test_parakeet_echo_gate.py  `slow`, real model: echo before a phrase not transcribed, speakers attached, word times through the cut; no-gate control
   live/                   opt-in (`pytest -m live`): real mic, real backend key
     test_elevenlabs_live.py  fixture to real EL: word times at the speech edges (realtime and upload), bad key
     test_aec_live.py      fixture through the speakers: cleaned source ≥ 10 dB below the mic; off / module / built-in side by side while you read
