@@ -1,5 +1,6 @@
 """Parakeet sessions over the socket on a TTS fixture; needs the model installed."""
 
+import base64
 import itertools
 from pathlib import Path
 
@@ -80,3 +81,23 @@ async def test_keyterms_go_in_per_stream(daemon: Harness) -> None:
     assert "pen marks" in texts[1]
     assert "routes the mic" in texts[2]
     assert ended["final_text"]
+
+
+async def test_a_file_through_transcribe_gets_word_times_in_file_time(daemon: Harness) -> None:
+    backend = ParakeetBackend(ParakeetConfig(), MODEL, Engine(load_recognizer))
+    await daemon.start(backends={"parakeet": backend})
+    client, _ = await daemon.connect("Scribbly")
+    started = await client.request("transcribe", {"word_timestamps": True})
+    assert started["type"] == "session_started", started
+    assert started["data"]["kind"] == "transcribe"
+    data = JARGON.read_bytes()
+    for at in range(0, len(data), 64 * 1024):
+        client.send("audio", {"data": base64.b64encode(data[at : at + 64 * 1024]).decode()})
+    stopped = await client.request("stop_session", timeout=30.0)
+    assert stopped["data"]["reason"] == "stopped", stopped
+    spoken = [m["data"] for m in client.of_type("segment") if m["data"]["text"]]
+    assert len(spoken) == 3, [s["text"] for s in spoken]
+    assert "pen marks" in spoken[1]["text"]
+    assert "routes the mic" in spoken[2]["text"]
+    for segment, edge_ms in zip(spoken, PHRASE_STARTS_MS, strict=True):
+        assert abs(segment["words"][0]["start_ms"] - edge_ms) <= 200, (segment["words"][0], edge_ms)

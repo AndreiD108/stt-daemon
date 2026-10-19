@@ -6,7 +6,7 @@ import pytest
 
 from stt_daemon.service.common import ServiceError
 from stt_daemon.service.launchd import LABEL, Launchd, render_plist
-from stt_daemon.service.preflight import check_portaudio, install_hint
+from stt_daemon.service.preflight import check_portaudio, check_tool, install_hint
 from stt_daemon.service.systemd import LIMITS, Systemd, exec_arg, render_unit
 
 
@@ -177,3 +177,25 @@ def test_launchd_remove_keeps_the_plist_when_launchctl_print_fails_otherwise(
     with pytest.raises(ServiceError, match="print"):
         launchd.remove()
     assert launchd.plist_file.exists()
+
+
+@pytest.mark.parametrize(
+    ("os_release", "command"),
+    [
+        ("ID=debian\n", "sudo apt install ffmpeg"),
+        ("ID=fedora\n", "sudo dnf install ffmpeg-free"),
+        ("ID=arch\n", "sudo pacman -S ffmpeg"),
+    ],
+)
+def test_check_tool_names_the_install_command_when_missing(
+    tmp_path: Path, os_release: str, command: str
+) -> None:
+    path = tmp_path / "os-release"
+    path.write_text(os_release)
+    problem = check_tool("ffmpeg", lambda _name: None, "linux", path)
+    assert problem is not None
+    assert problem.endswith(command)
+    assert check_tool("ffmpeg", lambda name: f"/usr/bin/{name}", "linux", path) is None
+    assert check_tool("ffmpeg", lambda _name: None, "darwin") == (
+        "ffmpeg is not installed or not on PATH. Install it: brew install ffmpeg"
+    )

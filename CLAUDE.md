@@ -27,6 +27,7 @@ src/                      package source
       frames.py           Frame, ring + attachments (FrameHub); one lock so attach sees each frame once
       capture.py          CaptureSource base (keep-open vs per-session holds), MicCapture: PortAudio (loaded on first use), watchdog
       wav_capture.py      WavCapture: WAV files in real time, silence between; mic stand-in for tests
+      stream_capture.py   ByteStreamCapture: client bytes via ffmpeg (or raw PCM) → frames on audio time, bounded queue
       vad.py              StreamingVAD: sherpa-onnx silero per window, own debounce, low-threshold edge lookback
       silero_vad.onnx     bundled silero VAD model (from sherpa-onnx releases)
       silero_vad.LICENSE  its MIT license
@@ -40,17 +41,18 @@ src/                      package source
       install.py          `backend install parakeet`: download, SHA-256 check, unpack, bpe.vocab from tokens.txt
     server/               the socket side: connections, commands, mic and backend slots, event routing
       __init__.py         empty package marker
-      socket.py           Server: socket file, hello gate, per-connection command order, routing, reload, shutdown
+      socket.py           Server: hello gate, per-connection command order, transcribe/audio, routing, reload, shutdown
+      connection.py       Connection (send, slow-reader close), line reading, socket file prep, SocketInUse
       messages.py         JSONL envelope; per-command field checks → bad_request / invalid naming the field
       wire.py             session and VAD events → protocol event data (words, after_word only when asked)
       backend_set.py      Setup: backends set up here, default; resolve a start (language, features, hints)
-      slot.py             Slot: mic slot idle/busy/evictable, sticky evictable timer, takeover order, two-step take, slot changes
+      slot.py             Slot: mic slot idle/busy/evictable, takeover order, backend-only (transcribe) starts, slot changes
       backend_slots.py    BackendSlots: per-backend max_sessions and the sessions holding them
       speech.py           SpeechWatch: daemon-wide VAD on all mic audio; VAD events, speech starts by id
       peer.py             socket peer's pid and cmdline: SO_PEERCRED + /proc; macOS LOCAL_PEERPID + KERN_PROCARGS2
     session/              one session: capture → VAD → pause cutting → backend → segments
       __init__.py         empty package marker
-      session.py          Session: start, audio loop, commit cadence, stop (bounded) / cancel / error end
+      session.py          Session: start, audio loop, commit cadence (wall or audio time), stop (bounded) / cancel / error end
       recovery.py         Link: unanswered-audio log, in-order sends, rollover, reconnect, paced replay
       events.py           what a session emits: started, partial, error, ended (+ evicted_by); segments from transcript
       pause_gate.py       PauseGate: sends speech and short pauses, holds long ones back to a pre-speech pad
@@ -63,10 +65,11 @@ src/                      package source
       common.py           Runner (injectable for tests), ServiceError, the installed stt-daemon script's path
       systemd.py          unit and limits.conf rendering, ExecStart escaping; install/remove/status/logs
       launchd.py          macOS agent plist (TMPDIR kept for the socket); launchctl calls
-      preflight.py        PortAudio load check; install command per distro from /etc/os-release
-    cli.py                `stt-daemon` entry point: run, service, key set, backend set-default/install, listen
+      preflight.py        PortAudio load check, tools on PATH (ffmpeg); install command per distro from /etc/os-release
+    cli.py                `stt-daemon` entry point: run, service, key set, backend set-default/install, listen, transcribe
     control.py            one blocking request to the running daemon (hello, command, reply); `reload` after key set
     listen.py             `listen`: session client printing events; terminal keys (Enter, marker key, Ctrl-C)
+    transcribe_client.py  `transcribe`: streams files as audio chunks, one session each; text or JSON out
     daemon.py             `run`: config, credentials, mic, server; SIGTERM/SIGINT shutdown
     config.py             config.toml loading, defaults, validation; config/socket paths per OS; in-place key writer
     credentials.py        API keys: mode-600 credentials.toml, <BACKEND>_API_KEY env, stdin keys; key writer
@@ -85,6 +88,7 @@ tests/
     test_frames.py        ring order, since-trimming, eviction, multi-attach, attach atomicity
     test_capture.py       device choice, holds, callback, stall/status recovery, backoff, hung stop
     test_wav_capture.py   WAV reading, real-time pacing, per-session open
+    test_stream_capture.py  byte stream with a stand-in decoder: order, audio-time stamps, failures, backpressure
     test_vad.py           edges on the fixture vs chunk size and window phase, delays, ids, gap reset
     test_speech_watch.py  daemon-wide VAD: events, speech starts by id and expiry, mic going quiet
     test_timeline.py      runs, cuts, edge snapping, jitter vs gaps, per-connection offsets
@@ -103,10 +107,11 @@ tests/
     test_messages.py      envelope parsing, encoding, per-command field checks
     test_backend_set.py   setup and default, language default and checks, features, hints, context lookup
     test_cli.py           run (broken config, --keys-stdin), key set and backend install default rule, set-default, backend remove, service files
+    test_transcribe_client.py  `transcribe` CLI vs a scripted daemon: file bytes, text and JSON output, exit codes
     test_parakeet.py      token → word grouping, hotwords, per-commit decoding, failures, model check
     test_parakeet_engine.py  load at open, one recognizer for all, decodes in turn, idle unload, load failure, reload
     test_install.py       bpe.vocab, unpack once, partial model replaced, bad download / archive leaves nothing
-    test_service.py       unit/plist rendering, ExecStart escaping, systemctl calls, remove guard, PortAudio hints
+    test_service.py       unit/plist rendering, ExecStart escaping, systemctl calls, remove guard, PortAudio and ffmpeg hints
   integration/            real daemon over a socket, WAV capture, fake backend
     conftest.py           `daemon` fixture
     harness.py            in-process Server on a temp socket; test clients; fixture helpers
@@ -114,6 +119,7 @@ tests/
     test_daemon_clients.py    hello gate, welcome, errors, busy and eviction, observers, disconnects, reload
     test_daemon_lifecycle.py  socket file, shutdown, context store, marker times
     test_daemon_speech.py     VAD event routing, speech_id starts (edge, expiry, mic closed, eviction)
+    test_daemon_transcribe.py transcribe: ffmpeg and raw PCM, file-time word times, slots beside mic, decoder errors
     test_cli_daemon.py        key set reloads the daemon; listen prints segments, exit codes
     test_parakeet_daemon.py   `slow`, real model: commits at pauses, word times at speech edges, keyterms per stream
   live/                   opt-in (`pytest -m live`): real mic, real backend key

@@ -12,7 +12,8 @@ from .backends import parakeet
 from .config import Config, ConfigError, load_config, socket_path
 from .credentials import CredentialsError, load_credentials
 from .server.backend_set import Setup, load_setup
-from .server.socket import Server, SocketInUse
+from .server.connection import SocketInUse
+from .server.socket import Server
 
 log = logging.getLogger(__name__)
 

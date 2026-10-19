@@ -4,6 +4,7 @@ from ..audio.frames import epoch_ms
 from ..audio.vad import SpeechStarted, VadEvent
 from ..session.events import (
     PartialText,
+    Progress,
     SessionEnded,
     SessionError,
     SessionEvent,
@@ -33,6 +34,8 @@ def session_event(
             }
         case PartialText():
             return "partial", {"session_id": session_id, "text": event.text}
+        case Progress():
+            return "progress", {"session_id": session_id, "audio_seconds": event.audio_seconds}
         case Segment():
             return "segment", segment(event, session_id)
         case SessionError():

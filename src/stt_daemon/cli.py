@@ -25,7 +25,7 @@ from stt_daemon.credentials import (
 )
 from stt_daemon.service.common import ServiceError, daemon_executable, run_command
 from stt_daemon.service.launchd import Launchd
-from stt_daemon.service.preflight import check_portaudio
+from stt_daemon.service.preflight import check_portaudio, check_tool
 from stt_daemon.service.systemd import Systemd
 
 KEY_BACKENDS = [name for name, cls in BACKENDS.items() if cls.takes_key]
@@ -54,6 +54,8 @@ def main(argv: list[str] | None = None) -> int:
                 return _set_default(args.backend)
             case "listen":
                 return _listen(args)
+            case "transcribe":
+                return _transcribe(args)
             case _:
                 _parser().print_help()
                 return 0
@@ -116,6 +118,16 @@ def _parser() -> argparse.ArgumentParser:
     listen.add_argument("--words", action="store_true", help="print word times")
     listen.add_argument("--partials", action="store_true", help="print partial text")
     listen.add_argument("--marker-key", default="m", help="key that adds a marker (default m)")
+
+    transcribe = commands.add_parser(
+        "transcribe", help="transcribe audio or video files (anything ffmpeg reads)"
+    )
+    transcribe.add_argument("files", nargs="+", type=Path, metavar="FILE")
+    transcribe.add_argument("--backend", help="default: the daemon's default backend")
+    transcribe.add_argument("--language", help="language code; default: the backend's")
+    transcribe.add_argument(
+        "--json", action="store_true", help="one JSON object per file: file, text, words, segments"
+    )
     return parser
 
 
@@ -152,6 +164,8 @@ def _service(args: argparse.Namespace) -> int:
                 print(f"wrote {path}")
             if unit_dir is None:
                 print("the service is enabled and running; it starts at login")
+            if problem := check_tool("ffmpeg"):
+                print(f"`stt-daemon transcribe` needs ffmpeg: {problem}")
             print(BACKEND_SETUP)
         case "remove":
             removed = manager.remove()
@@ -266,3 +280,10 @@ def _listen(args: argparse.Namespace) -> int:
         return 130
     except OSError as exc:
         return _fail(f"lost the daemon: {exc}")
+
+
+def _transcribe(args: argparse.Namespace) -> int:
+    from stt_daemon.transcribe_client import TranscribeOptions, transcribe
+
+    options = TranscribeOptions(backend=args.backend, language=args.language, json=args.json)
+    return asyncio.run(transcribe(socket_path(), args.files, options, sys.stdout, sys.stderr))

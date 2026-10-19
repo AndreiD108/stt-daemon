@@ -94,6 +94,7 @@ class Link:
         if limit is not None:
             self._rollover_s = (limit - SOFT_ROLLOVER_MARGIN_S, limit - HARD_ROLLOVER_MARGIN_S)
         self._log: list[_Item] = []
+        self._log_samples = 0
         self._sent = 0
         """Log items sent on the current connection; always a prefix of the log."""
         self._acked_samples = 0
@@ -124,7 +125,21 @@ class Link:
     def queue(self, out: Outgoing) -> None:
         if out.frame.samples.size:
             self._log.append(out)
+            self._log_samples += out.frame.samples.size
             self._wake.set()
+
+    @property
+    def backlog_s(self) -> float:
+        """Audio queued that no commit answer has covered yet."""
+        return self._log_samples / self._timeline.sample_rate
+
+    async def wait_backlog(self, max_s: float, stall_s: float) -> None:
+        """Wait until the backlog is at most `max_s`, or the link has failed. Raises
+        TimeoutError when the backend answers nothing for `stall_s` meanwhile."""
+        while self._alive and self.backlog_s > max_s:
+            self._progress.clear()
+            async with asyncio.timeout(stall_s):
+                await self._progress.wait()
 
     def commit(self, *, final: bool = False) -> None:
         """Ask for the text of the audio queued since the last commit. With none queued, `final`
@@ -397,6 +412,7 @@ class Link:
         for item in self._log[:count]:
             if isinstance(item, Outgoing):
                 self._acked_samples += item.frame.samples.size
+                self._log_samples -= item.frame.samples.size
         del self._log[:count]
         self._sent -= count
 

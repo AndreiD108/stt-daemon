@@ -1,15 +1,19 @@
+import base64
 import json
 
 import pytest
 
 from stt_daemon.server.messages import (
+    AUDIO_CHUNK_LIMIT,
     RequestError,
     StartRequest,
     encode,
+    parse_audio,
     parse_hello,
     parse_line,
     parse_marker,
     parse_start,
+    parse_transcribe,
 )
 
 
@@ -96,3 +100,30 @@ def test_marker_errors_are_invalid() -> None:
     assert code_of(parse_marker, {"marker": "  "})[0] == "invalid"
     assert code_of(parse_marker, {"marker": "a", "at": 1.5}) == ("invalid", "at")
     assert code_of(parse_marker, {"marker": "a", "at": True}) == ("invalid", "at")
+
+
+def test_audio_chunks_are_base64_up_to_the_limit() -> None:
+    full = bytes(AUDIO_CHUNK_LIMIT)
+    assert parse_audio({"data": base64.b64encode(full).decode()}) == full
+    over = base64.b64encode(full + b"\x00").decode()  # same base64 length band as the limit
+    assert code_of(parse_audio, {"data": over}) == ("invalid", "data")
+    assert code_of(parse_audio, {"data": "A" * (2 << 20)}) == ("invalid", "data")
+    assert code_of(parse_audio, {"data": "not base64!"}) == ("invalid", "data")
+    assert code_of(parse_audio, {"data": 5}) == ("invalid", "data")
+    assert code_of(parse_audio, {}) == ("invalid", "data")
+
+
+def test_transcribe_takes_start_fields_and_pcm_but_no_speech_id() -> None:
+    request = parse_transcribe({"backend": "fake", "pcm": {"rate": 48000, "channels": 2}})
+    assert request.start.backend == "fake"
+    assert request.pcm == (48000, 2)
+    assert parse_transcribe({}).pcm is None
+    assert code_of(parse_transcribe, {"speech_id": "s1"}) == ("bad_request", "speech_id")
+    for pcm in (
+        {"rate": 7999, "channels": 1},
+        {"rate": 16000, "channels": 3},
+        {"rate": True, "channels": 1},
+        {"rate": 16000},
+        [16000, 1],
+    ):
+        assert code_of(parse_transcribe, {"pcm": pcm}) == ("bad_request", "pcm")

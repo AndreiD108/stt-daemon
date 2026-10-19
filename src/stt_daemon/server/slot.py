@@ -1,7 +1,8 @@
 """The mic slot and the backend slots: who may start a session, takeover of an evictable one,
 slot changes.
 
-A session takes the mic slot and one slot on its backend. The slot sees every event of the
+A `mic` session takes the mic slot and one slot on its backend; a `transcribe` session takes
+only the backend slot and is never evictable. The slot sees every event of the
 sessions it starts (it wraps their `emit`), so `slot` changes go out in protocol order: the new
 holder's `slot` just before its `session_started`, and `idle` just after the last `session_ended`.
 """
@@ -116,6 +117,8 @@ class _Claim:
     opening: asyncio.Future[SessionStarted] | None = None
     place: BackendSession | None = None
     """Its slot on the session's backend."""
+    mic: bool = True
+    """Holds (or is taking) the mic slot."""
 
 
 class Slot:
@@ -139,6 +142,8 @@ class Slot:
         self._incoming: _Claim | None = None
         """A takeover's new client while the holder stops."""
         self._previous_end: float | None = None
+        self._inputs: dict[str, _Claim] = {}
+        """Sessions on a backend slot only (`transcribe`), by client id."""
         self.backends = BackendSlots(capacities)
         self._announced = _change_key(SlotState("idle", backends=self.backends.usage()))
         self._speaking = False
@@ -168,9 +173,11 @@ class Slot:
         return time.monotonic() if self._speaking else self._last_speech
 
     def session_of(self, client_id: str) -> Session | None:
-        """The client's started session, if it holds the slot."""
+        """The client's started session: the mic holder's, or one on a backend slot only."""
         claim = self._holder
-        if claim is None or claim.client.client_id != client_id or claim.started_at is None:
+        if claim is None or claim.client.client_id != client_id:
+            claim = self._inputs.get(client_id)
+        if claim is None or claim.started_at is None:
             return None
         return claim.session
 
@@ -204,27 +211,8 @@ class Slot:
                 blocker=blocking.place,
             )
         claim = _Claim(client, session_label)
-        session = claim.session = make_session(self._forward(claim))
-        backend = session.backend_name
-        blocker = self.backends.full(backend, leaving=holder.place if holder else None)
-        if blocker is not None:
-            raise StartRefused(
-                "busy",
-                f"{backend} already runs as many sessions as its max_sessions allows",
-                self.state,
-                full_slot="backend",
-                backend=backend,
-                blocker=blocker,
-            )
-        claim.place = BackendSession(
-            session.session_id,
-            session.kind,
-            backend,
-            client.client_id,
-            client.peer.pid,
-            client.label,
-        )
-        self.backends.take(claim.place)
+        claim.session = make_session(self._forward(claim))
+        self._take_backend(claim, leaving=holder.place if holder else None)
         if since is None:
             since = start_point(requested_at, self._pre_start_ms, self._previous_end)
         if holder is None:
@@ -236,6 +224,52 @@ class Slot:
                 raise
         return await self._take_over(holder, claim, since)
 
+    async def start_input(
+        self,
+        client: Client,
+        *,
+        make_session: Callable[[Emit], Session],
+        session_label: str | None = None,
+    ) -> SessionStarted:
+        """Start a session that takes a backend slot only. Raises `StartRefused`, `ClientGone`,
+        or what `make_session` and `Session.start` raise."""
+        if self._claim_of(client.client_id) is not None:
+            raise StartRefused("session_active", "this client already holds a session", self.state)
+        claim = _Claim(client, session_label, mic=False)
+        claim.session = make_session(self._forward(claim))
+        self._take_backend(claim, leaving=None)
+        self._inputs[client.client_id] = claim
+        try:
+            return await self._open(claim)
+        except BaseException:
+            self._drop(claim)
+            raise
+
+    def _take_backend(self, claim: _Claim, *, leaving: BackendSession | None) -> None:
+        session = claim.session
+        assert session is not None
+        backend = session.backend_name
+        blocker = self.backends.full(backend, leaving=leaving)
+        if blocker is not None:
+            raise StartRefused(
+                "busy",
+                f"{backend} already runs as many sessions as its max_sessions allows",
+                self.state,
+                full_slot="backend",
+                backend=backend,
+                blocker=blocker,
+            )
+        client = claim.client
+        claim.place = BackendSession(
+            session.session_id,
+            session.kind,
+            backend,
+            client.client_id,
+            client.peer.pid,
+            client.label,
+        )
+        self.backends.take(claim.place)
+
     async def client_gone(self, client_id: str) -> None:
         """The client disconnected: its running session is cancelled (`client_gone`)."""
         claim = self._claim_of(client_id)
@@ -245,12 +279,17 @@ class Slot:
         if claim.opening is not None and not claim.opening.done():
             claim.opening.cancel()
             await asyncio.wait([claim.opening])
-        elif claim.session is not None and claim.session.state == "running":
+        elif claim.session is not None and (
+            claim.session.state == "running"
+            or (claim.session.state == "stopping" and claim.session.kind != "mic")
+        ):
             await claim.session.cancel("client_gone")
 
     async def shutdown(self) -> None:
-        """Daemon exit, after pending starts are cancelled: the running session stops as
-        `stop_session` would."""
+        """Daemon exit, after pending starts are cancelled: the mic session stops as
+        `stop_session` would; sessions on a backend slot only are cancelled (input unfinished)."""
+        inputs = [c.session for c in self._inputs.values() if c.session is not None]
+        await asyncio.gather(*(s.cancel() for s in inputs if s.state != "new"))
         claim = self._holder
         if claim is None or claim.session is None or claim.session.state == "new":
             return
@@ -318,7 +357,8 @@ class Slot:
             if isinstance(event, SessionStarted):
                 claim.started_at = event.started_at
                 claim.started_mono = time.monotonic()
-                claim.watch = asyncio.create_task(self._watch(claim))
+                if claim.mic:
+                    claim.watch = asyncio.create_task(self._watch(claim))
                 self._announce()
             elif isinstance(event, SessionEnded):
                 if event.reason == "evicted" and claim.evicted_by is not None:
@@ -334,6 +374,8 @@ class Slot:
         if claim.watch is not None:
             claim.watch.cancel()
         self._release(claim)
+        if self._inputs.get(claim.client.client_id) is claim:
+            del self._inputs[claim.client.client_id]
         if self._holder is claim:
             assert claim.session is not None
             self._holder = None
@@ -346,6 +388,8 @@ class Slot:
             self._incoming = None
         if self._holder is claim:
             self._holder = None
+        if self._inputs.get(claim.client.client_id) is claim:
+            del self._inputs[claim.client.client_id]
         self._release(claim)
         self._announce()
 
@@ -388,7 +432,7 @@ class Slot:
         for claim in (self._incoming, self._holder):
             if claim is not None and claim.client.client_id == client_id:
                 return claim
-        return None
+        return self._inputs.get(client_id)
 
     def _holder_info(self, claim: _Claim) -> Holder:
         assert claim.session is not None

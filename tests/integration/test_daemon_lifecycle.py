@@ -11,7 +11,8 @@ from harness import FIXTURE, Harness, fake
 from stt_daemon.audio.wav_capture import WavCapture
 from stt_daemon.backends.fake import FakeReply
 from stt_daemon.config import Config
-from stt_daemon.server.socket import Server, SocketInUse
+from stt_daemon.server.connection import SocketInUse
+from stt_daemon.server.socket import Server
 
 
 async def test_the_socket_is_private(daemon: Harness) -> None:

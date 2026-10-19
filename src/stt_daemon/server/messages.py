@@ -1,5 +1,7 @@
 """The JSONL envelope and the checks on each command's `data`."""
 
+import base64
+import binascii
 import json
 import time
 from collections.abc import Mapping
@@ -7,6 +9,8 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 PROTOCOL = 1
+AUDIO_CHUNK_LIMIT = 1 << 20
+"""Most bytes one `audio` command may carry, decoded."""
 
 type MessageId = str | int
 
@@ -49,6 +53,13 @@ class StartRequest:
     partials: bool = False
     word_timestamps: bool = False
     speech_id: str | None = None
+
+
+@dataclass(frozen=True)
+class TranscribeRequest:
+    start: StartRequest
+    pcm: tuple[int, int] | None = None
+    """(rate, channels) of headerless s16le input."""
 
 
 @dataclass(frozen=True)
@@ -119,6 +130,54 @@ def parse_start(data: Mapping[str, Any]) -> StartRequest:
         word_timestamps=fields.flag("word_timestamps"),
         speech_id=fields.text("speech_id"),
     )
+
+
+def parse_transcribe(data: Mapping[str, Any]) -> TranscribeRequest:
+    if "speech_id" in data:
+        raise RequestError(
+            "bad_request",
+            "transcribe takes no speech_id; it reads the audio you send",
+            field="speech_id",
+        )
+    start = parse_start(data)
+    pcm = data.get("pcm")
+    if pcm is None:
+        return TranscribeRequest(start)
+    if not isinstance(pcm, dict):
+        raise RequestError("bad_request", "pcm must be an object: {rate, channels}", field="pcm")
+    fields = cast(dict[str, Any], pcm)
+    rate, channels = fields.get("rate"), fields.get("channels")
+    if not _int_in(rate, 8000, 192000):
+        raise RequestError(
+            "bad_request", "pcm.rate must be an integer, 8000 to 192000", field="pcm"
+        )
+    if not _int_in(channels, 1, 2):
+        raise RequestError("bad_request", "pcm.channels must be 1 or 2", field="pcm")
+    return TranscribeRequest(start, (cast(int, rate), cast(int, channels)))
+
+
+def parse_audio(data: Mapping[str, Any]) -> bytes:
+    value = data.get("data")
+    if not isinstance(value, str) or not value:
+        raise RequestError("invalid", "data must be the audio bytes in base64", field="data")
+    if len(value) > (AUDIO_CHUNK_LIMIT + 2) // 3 * 4:
+        raise _too_big()
+    try:
+        audio = base64.b64decode(value, validate=True)
+    except binascii.Error:
+        raise RequestError("invalid", "data is not valid base64", field="data") from None
+    if len(audio) > AUDIO_CHUNK_LIMIT:
+        raise _too_big()
+    return audio
+
+
+def _too_big() -> RequestError:
+    message = f"data holds more than {AUDIO_CHUNK_LIMIT} bytes; send smaller chunks"
+    return RequestError("invalid", message, field="data")
+
+
+def _int_in(value: object, low: int, high: int) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and low <= value <= high
 
 
 def parse_marker(data: Mapping[str, Any]) -> MarkerRequest:

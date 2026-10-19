@@ -9,34 +9,36 @@ import contextlib
 import itertools
 import logging
 import os
-import socket
-import stat
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .. import __version__
 from ..audio.capture import CaptureSource, CaptureUnavailable
+from ..audio.stream_capture import ByteStreamCapture, ToolMissing, ffmpeg_command
 from ..audio.vad import VadEvent
 from ..backends.base import OpenFailed
 from ..config import ConfigError
 from ..credentials import CredentialsError
+from ..service.preflight import check_tool
 from ..session.context import ContextStore, scope_of
 from ..session.events import SessionEnded, SessionEvent, SessionStarted
 from ..session.session import MarkerRefused, Session
 from . import wire
 from .backend_set import Setup, resolve
+from .connection import LINE_LIMIT, Connection, prepare_socket, readline
 from .messages import (
     PROTOCOL,
     Message,
     MessageId,
     RequestError,
-    encode,
+    parse_audio,
     parse_hello,
     parse_line,
     parse_marker,
     parse_start,
+    parse_transcribe,
 )
 from .peer import peer_of
 from .slot import Client, ClientGone, Slot, SlotState, StartRefused
@@ -44,47 +46,22 @@ from .speech import SpeechWatch
 
 log = logging.getLogger(__name__)
 
-LINE_LIMIT = 1 << 20
-WRITE_BUFFER_LIMIT = 8 << 20
-"""A client that lets this much pile up unread is closed."""
+COMMAND_QUEUE = 16
+"""Commands a connection may have waiting; then reading waits (an `audio` stream slows down)."""
 _CLOSE_TIMEOUT_S = 2.0
-
-
-class SocketInUse(Exception):
-    pass
-
-
-@dataclass(eq=False)
-class _Connection:
-    client: Client
-    writer: asyncio.StreamWriter
-    observe_all: bool = False
-    vad_events: bool = False
-    closed: bool = False
-    worker: asyncio.Task[None] | None = None
-
-    def send(
-        self, kind: str, data: Mapping[str, object], reply_to: MessageId | None = None
-    ) -> None:
-        transport = self.writer.transport
-        if self.closed or transport.is_closing():
-            return
-        self.writer.write(encode(kind, data, reply_to))
-        if transport.get_write_buffer_size() > WRITE_BUFFER_LIMIT:
-            log.warning("client %s reads too slowly; closing it", self.client.client_id)
-            self.closed = True
-            transport.abort()
 
 
 @dataclass(eq=False)
 class _Running:
-    conn: _Connection
+    conn: Connection
     session: Session
     session_label: str | None
     context_key: str | None
     start_id: MessageId | None
     end_id: MessageId | None = None
     """The `stop_session` or `cancel_session` that `session_ended` replies to."""
+    stream: ByteStreamCapture | None = None
+    """A `transcribe` session's input."""
 
 
 type _Item = tuple[Message | RequestError, float]
@@ -105,8 +82,8 @@ class Server:
         self.capture = capture
         self.setup = setup
         self._reload_setup = reload_setup
-        self._connections: set[_Connection] = set()
-        self._welcomed: dict[str, _Connection] = {}
+        self._connections: set[Connection] = set()
+        self._welcomed: dict[str, Connection] = {}
         self._handlers: set[asyncio.Task[None]] = set()
         self._running: dict[str, _Running] = {}
         self._contexts = ContextStore()
@@ -129,7 +106,7 @@ class Server:
 
     async def start(self) -> None:
         """Binds the socket. Raises `SocketInUse` when another daemon listens on it."""
-        _prepare_socket(self.path)
+        prepare_socket(self.path)
         umask = os.umask(0o177)
         try:
             self._server = await asyncio.start_unix_server(
@@ -167,7 +144,7 @@ class Server:
         assert task is not None
         self._handlers.add(task)
         client = Client(f"c{next(self._ids)}", peer=peer_of(writer.get_extra_info("socket")))
-        conn = _Connection(client, writer)
+        conn = Connection(client, writer)
         self._connections.add(conn)
         try:
             if await self._greet(conn, reader):
@@ -183,8 +160,8 @@ class Server:
             self._connections.discard(conn)
             self._handlers.discard(task)
 
-    async def _greet(self, conn: _Connection, reader: asyncio.StreamReader) -> bool:
-        line = await _readline(conn, reader)
+    async def _greet(self, conn: Connection, reader: asyncio.StreamReader) -> bool:
+        line = await readline(conn, reader)
         if not line or self._closing:
             return False
         try:
@@ -226,24 +203,24 @@ class Server:
         )
         return True
 
-    async def _read(self, conn: _Connection, reader: asyncio.StreamReader) -> None:
-        queue: asyncio.Queue[_Item] = asyncio.Queue()
+    async def _read(self, conn: Connection, reader: asyncio.StreamReader) -> None:
+        queue: asyncio.Queue[_Item] = asyncio.Queue(COMMAND_QUEUE)
         conn.worker = asyncio.create_task(self._work(conn, queue))
-        while line := await _readline(conn, reader):
+        while line := await readline(conn, reader):
             arrived = time.monotonic()
             if not line.strip():
                 continue
             try:
                 message = parse_line(line)
             except RequestError as exc:
-                queue.put_nowait((exc, arrived))
+                await queue.put((exc, arrived))
                 continue
             if message.type == "ping":
                 conn.send("pong", {}, message.id)
             else:
-                queue.put_nowait((message, arrived))
+                await queue.put((message, arrived))
 
-    async def _disconnect(self, conn: _Connection) -> None:
+    async def _disconnect(self, conn: Connection) -> None:
         conn.closed = True
         cid = conn.client.client_id
         if self._welcomed.pop(cid, None) is None:
@@ -255,7 +232,7 @@ class Server:
             await asyncio.wait([conn.worker])
         self._contexts.forget(scope_of(cid, None))
 
-    async def _work(self, conn: _Connection, queue: asyncio.Queue[_Item]) -> None:
+    async def _work(self, conn: Connection, queue: asyncio.Queue[_Item]) -> None:
         while True:
             item, arrived = await queue.get()
             if isinstance(item, RequestError):
@@ -270,10 +247,14 @@ class Server:
                 error = {"code": "internal", "message": "the daemon failed; see its log"}
                 conn.send("error", error, item.id)
 
-    async def _command(self, conn: _Connection, message: Message, arrived: float) -> None:
+    async def _command(self, conn: Connection, message: Message, arrived: float) -> None:
         match message.type:
             case "start_session":
                 await self._start(conn, message, arrived)
+            case "transcribe":
+                await self._transcribe(conn, message)
+            case "audio":
+                await self._audio(conn, message)
             case "add_marker":
                 self._add_marker(conn, message, arrived)
             case "stop_session" | "cancel_session":
@@ -285,7 +266,7 @@ class Server:
             case kind:
                 raise RequestError("bad_request", f"unknown message type {kind!r}")
 
-    async def _start(self, conn: _Connection, message: Message, arrived: float) -> None:
+    async def _start(self, conn: Connection, message: Message, arrived: float) -> None:
         request = parse_start(message.data)
         setup = self.setup
         since = None
@@ -324,15 +305,7 @@ class Server:
                 requested_at=arrived,
             )
         except StartRefused as exc:
-            if exc.full_slot == "mic":
-                next_step = "wait for a slot event with state idle or evictable"
-            elif exc.full_slot == "backend":
-                next_step = (
-                    f"wait for a slot event with room on {exc.backend}, or use another backend"
-                )
-            else:
-                next_step = "stop it first"
-            raise RequestError(exc.code, f"{exc.message}; {next_step}", **exc.to_wire()) from None
+            raise _refused(exc) from None
         except ClientGone:
             pass
         except CaptureUnavailable as exc:
@@ -346,7 +319,65 @@ class Server:
             if run is not None and run.session.started is None:
                 del self._running[cid]
 
-    def _add_marker(self, conn: _Connection, message: Message, arrived: float) -> None:
+    async def _transcribe(self, conn: Connection, message: Message) -> None:
+        request = parse_transcribe(message.data)
+        setup = self.setup
+        decoder = None if request.pcm == (16000, 1) else ffmpeg_command(request.pcm)
+        cid = conn.client.client_id
+        scope = scope_of(cid, conn.client.label)
+
+        def make_session(emit: Callable[[SessionEvent], None]) -> Session:
+            resolved = resolve(setup, request.start, lambda key: self._contexts.get(scope, key))
+            if decoder is not None and (problem := check_tool("ffmpeg")) is not None:
+                raise RequestError("tool_unavailable", problem, tool="ffmpeg")
+            stream = ByteStreamCapture(decoder)
+            session = Session(
+                config=setup.config,
+                capture=stream,
+                backend=resolved.backend,
+                options=resolved.options,
+                emit=emit,
+                kind="transcribe",
+            )
+            self._running[cid] = _Running(
+                conn, session, request.start.label, resolved.context_key, message.id, stream=stream
+            )
+            return session
+
+        try:
+            await self._slot.start_input(
+                conn.client, make_session=make_session, session_label=request.start.label
+            )
+        except StartRefused as exc:
+            raise _refused(exc) from None
+        except ClientGone:
+            pass
+        except ToolMissing as exc:
+            problem = check_tool(str(exc)) or f"{exc} could not be started"
+            raise RequestError("tool_unavailable", problem, tool=str(exc)) from None
+        except OpenFailed as exc:
+            raise RequestError(exc.code, exc.message) from None
+        finally:
+            run = self._running.get(cid)
+            if run is not None and run.session.started is None:
+                del self._running[cid]
+
+    async def _audio(self, conn: Connection, message: Message) -> None:
+        data = parse_audio(message.data)
+        cid = conn.client.client_id
+        session = self._slot.session_of(cid)
+        run = self._running.get(cid)
+        if session is None or run is None or run.stream is None:
+            raise RequestError(
+                "no_session", "this client has no transcribe session; send transcribe first"
+            )
+        if session.state != "running":
+            raise RequestError(
+                "no_session", "this client's session is already ending; its session_ended follows"
+            )
+        await run.stream.write(data)
+
+    def _add_marker(self, conn: Connection, message: Message, arrived: float) -> None:
         request = parse_marker(message.data)
         session = self._slot.session_of(conn.client.client_id)
         if session is None:
@@ -357,7 +388,7 @@ class Server:
             raise RequestError(exc.code, exc.message) from None
         conn.send("marker_accepted", {"marker": request.marker, "at_ms": at_ms}, message.id)
 
-    async def _end(self, conn: _Connection, message: Message) -> None:
+    async def _end(self, conn: Connection, message: Message) -> None:
         cid = conn.client.client_id
         session = self._slot.session_of(cid)
         run = self._running.get(cid)
@@ -373,7 +404,7 @@ class Server:
         else:
             await session.stop()
 
-    def _reload(self, conn: _Connection, message: Message) -> None:
+    def _reload(self, conn: Connection, message: Message) -> None:
         try:
             setup = self._reload_setup()
         except (ConfigError, CredentialsError) as exc:
@@ -442,33 +473,11 @@ class Server:
             self._contexts.put(scope, run.context_key, ended.plain_text)
 
 
-async def _readline(conn: _Connection, reader: asyncio.StreamReader) -> bytes:
-    """The next line; b"" at the end, or after an over-long line (which gets an error)."""
-    try:
-        return await reader.readline()
-    except ValueError:
-        message = f"a line is longer than {LINE_LIMIT} bytes; the daemon closes the connection"
-        conn.send("error", {"code": "bad_request", "message": message})
-        return b""
-
-
-def _prepare_socket(path: Path) -> None:
-    """Makes the socket's directory (700) and removes a stale socket nobody listens on."""
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    try:
-        mode = path.lstat().st_mode
-    except FileNotFoundError:
-        return
-    if not stat.S_ISSOCK(mode):
-        raise SocketInUse(
-            f"{path} exists and is not a socket; move it away or set STT_DAEMON_SOCKET"
-        )
-    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        probe.connect(str(path))
-    except (ConnectionRefusedError, FileNotFoundError):
-        path.unlink(missing_ok=True)
-        return
-    finally:
-        probe.close()
-    raise SocketInUse(f"another stt-daemon is already listening on {path}")
+def _refused(exc: StartRefused) -> RequestError:
+    if exc.full_slot == "mic":
+        next_step = "wait for a slot event with state idle or evictable"
+    elif exc.full_slot == "backend":
+        next_step = f"wait for a slot event with room on {exc.backend}, or use another backend"
+    else:
+        next_step = "stop it first"
+    return RequestError(exc.code, f"{exc.message}; {next_step}", **exc.to_wire())

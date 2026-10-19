@@ -4,8 +4,15 @@ One daemon owns the mic; many clients connect; one mic session runs at a time. T
 slot) is the right to run that session: a client takes it with `start_session` and gives it back
 when its session ends. Each backend also has slots: a session takes one on its backend, and a
 backend runs at most `max_sessions` sessions at once (config `backends.<name>.max_sessions`,
-default 2). Capacity counts sessions, not clients. Every session today is a mic session (`kind:
-"mic"`), so it takes the mic slot and one backend slot.
+default 2). Capacity counts sessions, not clients.
+
+Sessions come in two kinds:
+
+- `mic` (`start_session`): transcribes the daemon's mic. It takes the mic slot and one backend
+  slot.
+- `transcribe` (`transcribe`): transcribes audio bytes the client sends, a file in any format
+  ffmpeg reads, or raw PCM. It takes one backend slot and no mic slot, so it runs next to a mic
+  session and is never evictable. It runs as fast as the audio arrives.
 
 A minimal client: connect, send `hello`, read `welcome`, send `start_session`, read `segment`
 events, send `stop_session`, read `session_ended`. Error codes are in [Error codes](#error-codes).
@@ -15,7 +22,7 @@ events, send `stop_session`, read `session_ended`. Error codes are in [Error cod
 - Transport: JSONL (one JSON object per line, UTF-8, `\n`) over a Unix socket. Socket file
   permissions are the access control. Path: `$XDG_RUNTIME_DIR/stt-daemon/stt.sock` on Linux,
   `$TMPDIR/stt-daemon/stt.sock` on macOS; `STT_DAEMON_SOCKET` overrides it for the daemon and
-  for clients. A line longer than 1 MiB gets `bad_request` and the daemon closes the connection.
+  for clients. A line longer than 2 MiB gets `bad_request` and the daemon closes the connection.
 - Envelope, both directions:
 
   ```json
@@ -30,13 +37,17 @@ events, send `stop_session`, read `session_ended`. Error codes are in [Error cod
   cuts pauses before it sends audio to the backend and reconnects the backend on rollover; it maps
   the backend's times back, so session times include the pauses and run without seams. The daemon
   counts on a monotonic clock and converts to UTC with one offset taken when it starts, so a
-  wall-clock change can't move words.
+  wall-clock change can't move words. In a `transcribe` session, session times are positions in
+  the audio sent: `words[0].start_ms` of 61500 is 61.5 s into the file, however fast it arrived.
 - The first client message must be `hello`. Any other message first gets `error {code:
   "protocol"}`, and a line that isn't a valid message gets `bad_request`; either way the daemon
   closes the connection.
-- A client holds at most one session, so session commands act on the client's own session and
-  carry no id. The daemon generates a `session_id` and puts it on every session event, for logs.
-- Commands from one connection run one at a time, in order; `ping` is answered at once.
+- A client holds at most one session of either kind, so session commands act on the client's own
+  session and carry no id. A client that runs a mic session and a `transcribe` at once uses two
+  connections. The daemon generates a `session_id` and puts it on every session event, for logs.
+- Commands from one connection run one at a time, in order; `ping` is answered at once. When 16
+  commands wait, the daemon stops reading the connection until one is done, `ping` included: a
+  client streaming `audio` faster than the session takes it just waits on its socket writes.
 - Fields shown in an event's example are always present unless the text says when they are
   missing; a field that can be `null` says so.
 
@@ -135,6 +146,49 @@ follow `slot` events don't send it then.
 
 Reply: `session_started`, or `error` with one of the start codes in [Error codes](#error-codes).
 
+### `transcribe`
+
+```json
+{"backend": "parakeet", "language": "en", "word_timestamps": true, "pcm": {"rate": 48000, "channels": 2}}
+```
+
+Starts a `transcribe` session: the client then sends the audio with `audio` commands and ends it
+with `stop_session`. All fields optional. `label`, `backend`, `language`, `keyterms`,
+`previous_text`, `context_key`, `partials` and `word_timestamps` work as for `start_session`;
+`speech_id` is refused (`bad_request`).
+
+- `pcm`: the bytes are raw PCM, s16le, at `rate` (8000–192000) with `channels` (1 or 2). Raw PCM
+  has no header, so without `pcm` the bytes must be a file in a format ffmpeg reads (wav, mp3,
+  m4a, ogg, webm, mp4, …); ffmpeg decides, the daemon does not look at the bytes.
+- 16 kHz mono `pcm` goes to the session as it is. Anything else goes through an `ffmpeg` process
+  on the daemon's machine, which must be installed: without it the start fails with
+  `tool_unavailable` and the message names the install command.
+
+Checks run in this order: field types (`bad_request`), this client's session (`session_active`),
+the backend, language and features, ffmpeg (`tool_unavailable`), then room on the backend
+(`busy`, `full_slot: "backend"`). A full backend refuses the start; the daemon does not queue it.
+
+The session commits at each pause the VAD finds in the audio and after the backend's chunk cap
+of audio with no pause (25 s for ElevenLabs, `backends.parakeet.max_chunk_seconds` for
+Parakeet); it has no wall-clock commits. It sends `progress` events as it goes. It takes no more
+audio while 60 s of it (or twice the chunk cap, if more) waits for the backend's text; a backend
+that then answers nothing for 60 s ends the session with a fatal `backend_error`.
+
+Reply: `session_started` (`kind: "transcribe"`), or `error` with one of the start codes.
+
+### `audio`
+
+```json
+{"data": "UklGRiQAAABXQVZF…"}
+```
+
+- `data`: the next bytes of the input, base64, at most 1 MiB decoded (`invalid`, `field: "data"`
+  when larger or not base64). Send the input in order, in chunks of any size up to that.
+
+No reply when the bytes are taken. While the session is behind, the daemon takes them later and
+stops reading the connection (see [Conventions](#conventions)); the client needs no pacing of
+its own. Errors: `no_session` (the client has no `transcribe` session, or it is ending), `invalid`.
+
 ### `add_marker`
 
 ```json
@@ -145,6 +199,8 @@ Reply: `session_started`, or `error` with one of the start codes in [Error codes
 - `at` (optional, epoch ms UTC): when the event happened on the client. Missing: the time the
   message arrived. Earlier than `started_at`: the marker is refused (`out_of_range`). Later than
   the arrival time: the arrival time is used.
+- In a `transcribe` session, `at` is `started_at` plus the marker's position in the audio, in ms,
+  and may be past the audio sent so far. Missing: the end of the audio the session has taken in.
 
 Placement. No early commit; every accepted marker shows up in exactly one segment, unless the
 session is cancelled (`cancel_session`, or the client disconnects), which drops markers not yet
@@ -175,6 +231,13 @@ Reply: `session_ended` (reason `stopped`; `error`, after a `session_error`, when
 during the stop), or `error {code: "no_session"}`: the client has no session (for example, it was
 evicted), or the session is already ending and its `session_ended` follows.
 
+In a `transcribe` session, `stop_session` means the input is complete. The daemon decodes and
+transcribes the rest, which can be minutes of audio, then answers `session_ended` with the whole
+text. It waits as long as the session moves on and gives up after `session.stop_wait_ms` with no
+audio taken and no text from the backend. Input ffmpeg can't decode, or no audio at all, ends the
+session with `session_error {code: "invalid_request", fatal: true}`, whose message holds the end
+of ffmpeg's error output, and `session_ended` (reason `error`).
+
 ### `cancel_session`
 
 ```json
@@ -182,7 +245,9 @@ evicted), or the session is already ending and its `session_ended` follows.
 ```
 
 Drops what is left. Reply: `session_ended` (reason `cancelled`), or `error {code: "no_session"}`,
-as for `stop_session`.
+as for `stop_session`. A `cancel_session` sent after `stop_session` waits behind it (commands run
+in order); to drop a `transcribe` session that is still finishing, disconnect. A disconnect or a
+daemon shutdown cancels a `transcribe` session at any point, finishing or not.
 
 ### `reload`
 
@@ -313,8 +378,9 @@ released, and when a `reload` changes the backends or their `max_sessions`.
 }
 ```
 
-- `kind`: `mic`, a session on the daemon's mic, the only kind today.
-- `started_at`: capture time of the session's first sample.
+- `kind`: `mic` or `transcribe`; see the intro.
+- `started_at`: capture time of the session's first sample. For `transcribe`, the time the
+  session started; its session times count from there in audio time.
 - `previous_text`: the context hint the session uses, from the command or the `context_key` store,
   before the backend trims it; `null` when none.
 - `client_label`, `session_label`, `language`: `null` when not set.
@@ -366,7 +432,18 @@ previous one; a `segment` replaces the partial. Only with `partials: true`.
   stop. Parakeet, which transcribes after the fact: at each pause the VAD reports, once 30 s of
   audio was sent with no pause (config `backends.parakeet.max_chunk_seconds`), and at stop.
   Parakeet sessions share one model and take turns to transcribe, so a commit can wait for
-  another session's.
+  another session's. A `transcribe` session commits by audio time instead; see
+  [`transcribe`](#transcribe).
+
+### `progress`
+
+```json
+{"session_id": "…", "audio_seconds": 61.536}
+```
+
+How much of a `transcribe` session's audio the session has taken in, in seconds from its start.
+At most one a second while the audio comes, and one more once the input is complete
+(`stop_session`), with the total.
 
 ### `session_ended`
 
@@ -385,6 +462,7 @@ previous one; a `segment` replaces the partial. Only with `partials: true`.
 - `final_text`: all segments joined, markers inline. Kept on `evicted`.
 - `evicted_by`: only with reason `evicted`; `pid` and `client_label` can be `null`.
 - `client_gone`: the holder disconnected; the session is cancelled. Only observers see it.
+- `cancelled` also ends a `transcribe` session the daemon drops when it shuts down.
 
 ### `session_error`
 
@@ -429,30 +507,32 @@ Codes of `error` replies, and of `session_error` for the backend codes.
 | `protocol_unsupported` | `hello` | `supported` lists the daemon's protocol versions. |
 | `observers_disabled` | `hello` | The config has `server.observers = false`; connect without `observe_all`. |
 | `bad_request` | any | Not a valid message or command; `field` names a field of the wrong type. |
-| `busy` | `start_session` | A slot is full; `slot` has every slot. `full_slot`: `mic` (another client holds the mic slot; wait for a `slot` event with `idle` or `evictable`) or `backend` (`backend` runs `max_sessions` sessions; wait for room or use another backend). `holder` (`pid`, `client_label`, `kind`; the first two can be `null`) is the session in the way: the mic holder, or the oldest on the backend. |
-| `session_active` | `start_session` | This client already holds a session; `slot` has it. Stop it first. |
+| `busy` | `start_session`, `transcribe` | A slot is full; `slot` has every slot. `full_slot`: `mic` (another client holds the mic slot; wait for a `slot` event with `idle` or `evictable`) or `backend` (`backend` runs `max_sessions` sessions; wait for room or use another backend). `holder` (`pid`, `client_label`, `kind`; the first two can be `null`) is the session in the way: the mic holder, or the oldest on the backend. |
+| `session_active` | `start_session`, `transcribe` | This client already holds a session; `slot` has it. Stop it first. |
 | `speech_expired` | `start_session` | The `speech_id` is unknown or its start left the buffer. Start without it. |
-| `no_backend` | `start_session` | No backend set up; the message names `stt-daemon key set elevenlabs` and `stt-daemon backend install parakeet`. |
-| `unknown_backend` | `start_session` | `backend` isn't set up here; pick one from `welcome.backends`. |
-| `unsupported_language` | `start_session` | The backend lacks that language (or the config's default language). |
-| `unsupported` | `start_session` | The backend lacks a requested feature. Start without it. |
+| `no_backend` | `start_session`, `transcribe` | No backend set up; the message names `stt-daemon key set elevenlabs` and `stt-daemon backend install parakeet`. |
+| `unknown_backend` | `start_session`, `transcribe` | `backend` isn't set up here; pick one from `welcome.backends`. |
+| `unsupported_language` | `start_session`, `transcribe` | The backend lacks that language (or the config's default language). |
+| `unsupported` | `start_session`, `transcribe` | The backend lacks a requested feature. Start without it. |
 | `mic_unavailable` | `start_session` | The mic didn't open. |
-| `no_session` | `add_marker`, `stop_session`, `cancel_session` | No session, or it is already ending. |
+| `tool_unavailable` | `transcribe` | A program the daemon needs isn't installed; `tool` names it (`ffmpeg`), the message gives the install command. Raw 16 kHz mono `pcm` needs none. |
+| `no_session` | `add_marker`, `audio`, `stop_session`, `cancel_session` | No session, or it is already ending. |
 | `session_stopping` | `add_marker` | The session is ending. |
-| `invalid` | `add_marker` | `marker` missing or blank; `field` names a field of the wrong type. |
+| `invalid` | `add_marker`, `audio` | `marker` missing or blank, or `data` not base64 or over 1 MiB; `field` names the field. |
 | `out_of_range` | `add_marker` | `at` is before `started_at`. |
 | `config` | `reload` | Config or credentials invalid; the last setup stays. |
 | `internal` | any | The daemon failed; its log says why. |
 
-Backend codes come as the reply to `start_session` when the backend can't connect, and in
-`session_error` during a session. For a code the daemon doesn't retry, the session ends at once
-(`fatal: true`), and starting again gives the same error until the user fixes the cause.
+Backend codes come as the reply to `start_session` or `transcribe` when the backend can't
+connect, and in `session_error` during a session. For a code the daemon doesn't retry, the
+session ends at once (`fatal: true`), and starting again gives the same error until the user fixes
+the cause.
 
 | Code | Retried | Meaning |
 | --- | --- | --- |
 | `auth` | no | The API key was refused; the user sets a new one with `stt-daemon key set`. |
 | `quota` | no | The account is out of quota. |
-| `invalid_request` | no | The backend rejected the request or the audio. |
+| `invalid_request` | no | The backend rejected the request or the audio; for `transcribe`, also input ffmpeg can't decode. |
 | `model_error` | no | The local model didn't load; the message names the directory to delete before reinstalling. |
 | `rate_limited` | yes, during a session | Throttled. At start (HTTP 429) it isn't retried; start again later. |
 | `network` | yes | The connection failed or timed out. |

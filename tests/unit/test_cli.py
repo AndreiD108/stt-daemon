@@ -247,3 +247,19 @@ def test_service_install_stops_when_portaudio_is_missing(
     assert main(["service", "install", "--unit-dir", str(tmp_path)]) == 1
     assert "Install it: X" in capsys.readouterr().err
     assert list(tmp_path.iterdir()) == []
+
+
+def ffmpeg_missing(tool: str) -> str:
+    return f"{tool} is missing. Install it: Y"
+
+
+def test_service_install_names_ffmpeg_when_missing_and_still_installs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cli, "check_portaudio", lambda: None)
+    monkeypatch.setattr(cli, "check_tool", ffmpeg_missing)
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.setattr(cli, "daemon_executable", lambda: Path("/tools/bin/stt-daemon"))
+    assert main(["service", "install", "--unit-dir", str(tmp_path)]) == 0
+    assert "ffmpeg is missing. Install it: Y" in capsys.readouterr().out
+    assert (tmp_path / "stt-daemon.service").exists()

@@ -6,7 +6,7 @@ from typing import Literal
 from .transcript import Segment
 
 type EndReason = Literal["stopped", "cancelled", "evicted", "client_gone", "error"]
-type SessionKind = Literal["mic"]
+type SessionKind = Literal["mic", "transcribe"]
 
 
 @dataclass(frozen=True)
@@ -23,6 +23,12 @@ class SessionStarted:
 @dataclass(frozen=True)
 class PartialText:
     text: str
+
+
+@dataclass(frozen=True)
+class Progress:
+    audio_seconds: float
+    """Input audio taken in so far (`transcribe` sessions)."""
 
 
 @dataclass(frozen=True)
@@ -52,4 +58,4 @@ class SessionEnded:
     """`final_text` without markers."""
 
 
-type SessionEvent = SessionStarted | PartialText | Segment | SessionError | SessionEnded
+type SessionEvent = SessionStarted | PartialText | Progress | Segment | SessionError | SessionEnded

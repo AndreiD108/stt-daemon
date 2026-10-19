@@ -1,18 +1,47 @@
-"""PortAudio check: the Linux `sounddevice` wheels don't bundle it, so the system must have it."""
+"""System dependency checks: PortAudio (the Linux `sounddevice` wheels don't bundle it) and the
+external tools some sessions run, each with its install command for this system."""
 
+import shutil
 import sys
 from collections.abc import Callable
 from pathlib import Path
 
-_INSTALL = {
-    "debian": "sudo apt install libportaudio2",
-    "ubuntu": "sudo apt install libportaudio2",
-    "fedora": "sudo dnf install portaudio",
-    "rhel": "sudo dnf install portaudio",
-    "centos": "sudo dnf install portaudio",
-    "arch": "sudo pacman -S portaudio",
-    "suse": "sudo zypper install libportaudio2",
-    "opensuse": "sudo zypper install libportaudio2",
+_MANAGERS = {
+    "debian": "apt",
+    "ubuntu": "apt",
+    "fedora": "dnf",
+    "rhel": "dnf",
+    "centos": "dnf",
+    "arch": "pacman",
+    "suse": "zypper",
+    "opensuse": "zypper",
+}
+_COMMANDS = {
+    "apt": "sudo apt install",
+    "dnf": "sudo dnf install",
+    "pacman": "sudo pacman -S",
+    "zypper": "sudo zypper install",
+    "brew": "brew install",
+}
+_PACKAGES = {
+    "portaudio": {
+        "apt": "libportaudio2",
+        "dnf": "portaudio",
+        "pacman": "portaudio",
+        "zypper": "libportaudio2",
+        "brew": "portaudio",
+    },
+    "ffmpeg": {
+        "apt": "ffmpeg",
+        "dnf": "ffmpeg-free",
+        "pacman": "ffmpeg",
+        "zypper": "ffmpeg",
+        "brew": "ffmpeg",
+    },
+}
+_FALLBACK = {
+    "portaudio": "PortAudio (libportaudio.so.2) from your distribution's packages",
+    "ffmpeg": "ffmpeg from your distribution's packages",
 }
 
 
@@ -33,14 +62,33 @@ def check_portaudio(
     return None
 
 
-def install_hint(platform: str | None = None, os_release: Path = Path("/etc/os-release")) -> str:
+def check_tool(
+    tool: str,
+    which: Callable[[str], str | None] = shutil.which,
+    platform: str | None = None,
+    os_release: Path = Path("/etc/os-release"),
+) -> str | None:
+    """None when `tool` is on PATH; else a message that names the install command."""
+    if which(tool) is not None:
+        return None
+    hint = install_hint(platform, os_release, package=tool)
+    return f"{tool} is not installed or not on PATH. Install it: {hint}"
+
+
+def install_hint(
+    platform: str | None = None,
+    os_release: Path = Path("/etc/os-release"),
+    *,
+    package: str = "portaudio",
+) -> str:
     platform = sys.platform if platform is None else platform
+    packages = _PACKAGES[package]
     if platform == "darwin":
-        return "brew install portaudio"
+        return f"{_COMMANDS['brew']} {packages['brew']}"
     for distro in _distro_ids(os_release):
-        if command := _INSTALL.get(distro):
-            return command
-    return "PortAudio (libportaudio.so.2) from your distribution's packages"
+        if manager := _MANAGERS.get(distro):
+            return f"{_COMMANDS[manager]} {packages[manager]}"
+    return _FALLBACK[package]
 
 
 def _distro_ids(os_release: Path) -> list[str]:

@@ -75,6 +75,16 @@ stt-daemon listen --words
 
 Speak, press Enter, and read what the daemon heard.
 
+## Transcribe a file
+
+```sh
+stt-daemon transcribe talk.m4a notes.mp3           # the text of each, a blank line between
+stt-daemon transcribe --json --backend parakeet talk.m4a   # text, words and segments as JSON
+```
+
+Anything ffmpeg reads works: audio or video. The file goes through the daemon as fast as the
+backend takes it, and word times count from the start of the file. It needs `ffmpeg` on your PATH.
+
 ## Update
 
 ```sh

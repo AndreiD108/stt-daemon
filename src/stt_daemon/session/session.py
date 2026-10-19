@@ -3,26 +3,31 @@
 Everything runs on the event loop. One task reads the capture attachment; another commits on the
 backend's cadence. Audio and commits go to a `Link`, which sends them in order and survives the
 backend's connections ending.
+
+A `transcribe` session reads a `ByteStreamCapture` on audio time: it commits at pauses and at a
+chunk cap instead of on a wall-clock cadence, and its `stop` means the end of input.
 """
 
 import asyncio
 import logging
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 
 from ..audio.capture import CaptureSource
 from ..audio.frames import Attachment, Frame, epoch_ms
+from ..audio.stream_capture import ByteStreamCapture, DecodeFailed
 from ..audio.vad import WINDOW, SpeechEnded, StreamingVAD
 from ..backends.base import Backend, CommitPolicy, Committed, OpenOptions
 from ..config import Config
 from .events import (
     EndReason,
     PartialText,
+    Progress,
     SessionEnded,
     SessionError,
     SessionEvent,
@@ -40,6 +45,13 @@ log = logging.getLogger(__name__)
 _END_OF_AUDIO = Frame(np.zeros(0, dtype=np.float32), 0.0, 16000)
 
 type State = Literal["new", "running", "stopping", "ending", "ended"]
+
+PROGRESS_EVERY_S = 1.0
+MIN_BACKLOG_S = 60.0
+"""A `transcribe` session takes no more input while this much audio waits for the backend
+(or twice its chunk cap, if more)."""
+STALL_S = 60.0
+"""A `transcribe` session at that limit fails when its backend answers nothing for this long."""
 
 
 class MarkerRefused(Exception):
@@ -109,7 +121,21 @@ class Session:
         self._commit_task: asyncio.Task[None] | None = None
         self._ending_task: asyncio.Task[None] | None = None
         self._stop_failure: SessionError | None = None
+        self._finishing = False
+        self._end_put: asyncio.Future[None] | None = None
         self._ended: asyncio.Future[SessionEnded] = asyncio.get_running_loop().create_future()
+        policy = backend.capabilities.commit_policy
+        self._at_pauses = policy.at_pauses
+        self._chunk_cap_s = policy.max_chunk_s
+        self._stream: ByteStreamCapture | None = None
+        self._last_progress = 0.0
+        if kind == "transcribe":
+            assert isinstance(capture, ByteStreamCapture)
+            self._stream = capture
+            capture.on_failed = lambda message: self._fail("invalid_request", message)
+            self._at_pauses = True
+            self._chunk_cap_s = policy.max_chunk_s or policy.interval_s
+        self._max_backlog_s = max(MIN_BACKLOG_S, 2 * (self._chunk_cap_s or 0))
 
     @property
     def state(self) -> State:
@@ -170,7 +196,7 @@ class Session:
         self._audio_task = asyncio.create_task(self._audio_loop())
         self._audio_task.add_done_callback(self._audio_loop_done)
         policy = self._backend.capabilities.commit_policy
-        if policy.interval_s is not None:
+        if policy.interval_s is not None and self._stream is None:
             self._commit_task = asyncio.create_task(self._commit_loop(policy))
         self._emit(self.started)
         return self.started
@@ -179,15 +205,22 @@ class Session:
         self, marker: str, at: int | None = None, *, arrived: float | None = None
     ) -> int:
         """Accept a marker; `at` is epoch ms, no later than `arrived` (monotonic, when the
-        command came; default now), which is also the default. Returns its session ms."""
+        command came; default now), which is also the default. Returns its session ms.
+
+        On audio time (`transcribe`), `at` is `started_at` plus audio ms, and the default is the
+        end of the audio taken in so far."""
         if self._state != "running" or self.started is None:
             if self._state == "new":
                 raise MarkerRefused("no_session", "the session hasn't started; wait for it")
             raise MarkerRefused(
                 "session_stopping", "the session is ending and takes no more markers"
             )
-        arrived_ms = self._timeline.to_ms(time.monotonic() if arrived is None else arrived)
-        at_ms = arrived_ms if at is None else min(at - self.started.started_at, arrived_ms)
+        if self._stream is not None:
+            arrived_ms = self._timeline.to_ms(self.audio_end)
+            at_ms = arrived_ms if at is None else at - self.started.started_at
+        else:
+            arrived_ms = self._timeline.to_ms(time.monotonic() if arrived is None else arrived)
+            at_ms = arrived_ms if at is None else min(at - self.started.started_at, arrived_ms)
         if at_ms < 0:
             raise MarkerRefused(
                 "out_of_range", "the marker's time is before the session's first audio"
@@ -205,11 +238,17 @@ class Session:
     async def cancel(
         self, reason: Literal["cancelled", "client_gone"] = "cancelled"
     ) -> SessionEnded:
-        """Drop what isn't committed and end; segments already sent stay in `final_text`."""
+        """Drop what isn't committed and end; segments already sent stay in `final_text`.
+        A stopping `transcribe` session is cut short too: its stop can take minutes."""
         if self._state == "running":
             self._state = "ending"
             self._markers.clear()
             self._ending_task = asyncio.create_task(self._end(reason))
+        elif self._state == "stopping" and self._stream is not None and not self._finishing:
+            assert self._ending_task is not None
+            self._state = "ending"
+            self._markers.clear()
+            self._ending_task = asyncio.create_task(self._abandon(self._ending_task, reason))
         return await self.wait_ended()
 
     async def wait_ended(self) -> SessionEnded:
@@ -222,6 +261,17 @@ class Session:
         queue = self._attachment.queue
         while (frame := await queue.get()) is not _END_OF_AUDIO:
             await self._take(frame)
+            if self._stream is not None:
+                assert self._link is not None
+                self._report_progress(final=False)
+                try:
+                    await self._link.wait_backlog(self._max_backlog_s, STALL_S)
+                except TimeoutError:
+                    # Else the input waits on this session for good, and the client's commands
+                    # wait behind its audio.
+                    message = f"the backend answered nothing for {STALL_S:g} s"
+                    self._on_fatal("backend_error", message)
+                    return
 
     def _audio_loop_done(self, task: asyncio.Task[None]) -> None:
         if task.cancelled() or (error := task.exception()) is None:
@@ -240,11 +290,10 @@ class Session:
         events = self._vad.push(frame)
         for part in self._gate.push(frame, events):
             self._queue(part)
-        policy = self._backend.capabilities.commit_policy
         paused = any(isinstance(e, SpeechEnded) for e in events)
-        if policy.at_pauses and paused and self._speech_since_commit:
+        if self._at_pauses and paused and self._speech_since_commit:
             self._commit()
-        cap = policy.max_chunk_s
+        cap = self._chunk_cap_s
         if cap is not None and self._samples_since_commit >= cap * self._capture.sample_rate:
             self._commit()
         assert self._link is not None
@@ -257,6 +306,12 @@ class Session:
             due = time.monotonic() - self._last_commit_at >= policy.interval_s
             if due and self._speech_since_commit:
                 self._commit()
+
+    def _report_progress(self, *, final: bool) -> None:
+        now = time.monotonic()
+        if final or now - self._last_progress >= PROGRESS_EVERY_S:
+            self._last_progress = now
+            self._emit(Progress(round(self.audio_end - self._timeline.origin, 3)))
 
     def _queue(self, out: Outgoing) -> None:
         assert self._link is not None
@@ -327,14 +382,17 @@ class Session:
         )
 
     async def _stop_and_finish(self, reason: Literal["stopped", "evicted"]) -> None:
+        wait_s = self._config.session.stop_wait_ms / 1000
         try:
-            async with asyncio.timeout(self._config.session.stop_wait_ms / 1000):
-                await self._stop_intake(drain=True)
-                for out in self._gate.flush():
-                    self._queue(out)
-                self._commit(final=True)
-                assert self._link is not None
-                await self._link.settle()
+            if self._stream is not None:
+                await self._while_moving(self._drain_input(), wait_s)
+            else:
+                async with asyncio.timeout(wait_s):
+                    await self._send_rest()
+        except DecodeFailed as exc:
+            await self._stop_intake(drain=False)
+            await self._finish("error", SessionError("invalid_request", exc.message, True))
+            return
         except TimeoutError:
             log.warning("session %s: stopped before the backend's last text came", self.session_id)
             await self._stop_intake(drain=False)
@@ -349,9 +407,48 @@ class Session:
         else:
             await self._finish(reason)
 
+    async def _drain_input(self) -> None:
+        assert self._stream is not None
+        await self._stream.finish()
+        await self._send_rest()
+
+    async def _send_rest(self) -> None:
+        await self._stop_intake(drain=True)
+        if self._stream is not None:
+            self._report_progress(final=True)
+        for out in self._gate.flush():
+            self._queue(out)
+        self._commit(final=True)
+        assert self._link is not None
+        await self._link.settle()
+
+    async def _while_moving(self, work: Coroutine[Any, Any, None], quiet_s: float) -> None:
+        """Run `work`; TimeoutError once neither audio is taken nor a commit answered for
+        `quiet_s`. On audio time the rest can be minutes of audio, so no fixed bound fits."""
+        assert self._link is not None
+        task = asyncio.ensure_future(work)
+        seen = (self.audio_end, self._link.backlog_s)
+        try:
+            while not (await asyncio.wait([task], timeout=quiet_s))[0]:
+                now = (self.audio_end, self._link.backlog_s)
+                if now == seen:
+                    raise TimeoutError
+                seen = now
+        finally:
+            task.cancel()
+            await asyncio.wait([task])
+        task.result()
+
     async def _end(self, reason: EndReason, error: SessionError | None = None) -> None:
         await self._stop_intake(drain=False)
         await self._finish(reason, error)
+
+    async def _abandon(self, stopping: asyncio.Task[None], reason: EndReason) -> None:
+        if not self._finishing:
+            stopping.cancel()
+        await asyncio.wait([stopping])
+        if not self._finishing:
+            await self._end(reason)
 
     async def _stop_intake(self, *, drain: bool) -> None:
         """Stop taking audio; with `drain`, first take what capture delivered before now."""
@@ -359,14 +456,19 @@ class Session:
         assert self._audio_task is not None
         self._attachment.detach()
         if drain:
-            asyncio.get_running_loop().call_soon(self._attachment.queue.put_nowait, _END_OF_AUDIO)
+            # A task, not put_nowait: a stream's queue is bounded. It runs after the frames
+            # capture already scheduled.
+            self._end_put = asyncio.ensure_future(self._attachment.queue.put(_END_OF_AUDIO))
         elif self._audio_task is not asyncio.current_task():
             self._audio_task.cancel()
+            if self._end_put is not None:
+                self._end_put.cancel()
         await asyncio.wait([self._audio_task])
         if self._commit_task is not None:
             self._commit_task.cancel()
 
     async def _finish(self, reason: EndReason, error: SessionError | None = None) -> None:
+        self._finishing = True
         if self._link is not None:
             await self._link.close()
         if self._markers:
