@@ -47,9 +47,10 @@ src/                      package source
       elevenlabs_batch.py  file upload API: transcribe only, bytes as sent, one retry, 20–30 s speaker runs → commits
       fake.py             FakeBackend for tests: scripted replies, partials, delays, failures, warnings, time limit, text only
       chunked.py          ChunkedConnection: audio buffered, each commit's chunk transcribed in order; Turns (one at a time, dictation first)
-      parakeet.py         local Parakeet TDT on sherpa-onnx: shared recognizer (load at open, decodes in turn, idle unload), token → word times
+      parakeet.py         local Parakeet TDT on `tdt`: shared recognizer (load at open, decodes in turn, idle unload), token → word times
       plugins.py          plugin files: import by path, checks, setup per load, limits; PluginBackend on the chunked connection, 120 s timeout
-      install.py          `backend install parakeet`: download, SHA-256 check, unpack, bpe.vocab from tokens.txt
+      tdt.py              Parakeet TDT on onnxruntime: sherpa-matched features, frame-bucketed beam search, keyterm trie boost
+      install.py          `backend install parakeet`: download, SHA-256 check, unpack
     server/               the socket side: connections, commands, mic and backend slots, event routing
       __init__.py         empty package marker
       socket.py           Server: hello gate, per-connection command order, transcribe/audio, routing, reload, shutdown
@@ -177,12 +178,6 @@ Keep it derived: a fixed hold shorter than the delay cuts the first syllable aft
 The recovery log (`session/recovery.py`) keeps every audio frame and commit that no connection has
 answered; a commit's answer trims it. After a reconnect the new connection gets the whole log
 first. Trimming on send instead of on answer loses audio when a connection fails.
-
-## Parakeet's `bpe.vocab` is generated
-
-sherpa-onnx's Parakeet export has no `bpe.vocab`, which hotword decoding needs.
-`backends/install.py` writes one from `tokens.txt`, score = minus the token id, not the real
-SentencePiece scores. Tokens that start a word begin with a space, not `▁`.
 
 ## PipeWire and Core Audio
 

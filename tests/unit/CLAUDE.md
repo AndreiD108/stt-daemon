@@ -57,9 +57,10 @@ test_cli.py           run (broken config, --keys-stdin), key set and backend ins
 test_transcribe_client.py  `transcribe` CLI vs a scripted daemon: file bytes, text and JSON output, exit codes
 test_plugins.py       plugin loader and failures, statuses, config and limits, adapter: chunks, s16le, turns, timeout, options; docs example
 test_cli_plugins.py   backend list, key set / install / set-default by plugin name
-test_parakeet.py      token → word grouping, hotwords, per-commit decoding, failures, model check
+test_parakeet.py      token → word grouping, per-commit decoding, failures, model check
+test_tdt.py           keyterm BPE split; trie scoring: whole, broken, restarted, open at the end, nested
 test_parakeet_engine.py  load at open, one recognizer for all, decodes in turn, idle unload, load failure, reload
-test_install.py       bpe.vocab, unpack once, partial model replaced, bad download / archive leaves nothing
+test_install.py       unpack once, partial model replaced, bad download / archive leaves nothing
 test_service.py       unit/plist rendering, ExecStart escaping, systemctl calls, remove guard, PortAudio, ffmpeg and audiotee hints
 ```
 <!-- END FILE TREE -->

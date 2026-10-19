@@ -1,4 +1,4 @@
-"""`stt-daemon backend install parakeet`: download, check, unpack, and add `bpe.vocab`."""
+"""`stt-daemon backend install parakeet`: download, check, unpack."""
 
 import hashlib
 import shutil
@@ -10,7 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import BinaryIO, TextIO
 
-from .parakeet import BPE_VOCAB, DECODER, ENCODER, JOINER, MODEL_FILES, TOKENS, model_dir
+from .parakeet import DECODER, ENCODER, JOINER, MODEL_FILES, TOKENS, model_dir
 
 URL = (
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
@@ -53,26 +53,12 @@ def install_parakeet(
         try:
             _unpack(archive, staged)
             archive.unlink()
-            write_bpe_vocab(staged / TOKENS, staged / BPE_VOCAB)
         except (tarfile.TarError, EOFError, OSError) as exc:
             raise InstallError(f"could not unpack the model: {exc}") from None
         if target.exists():
             shutil.rmtree(target)
         staged.rename(target)
     return target, True
-
-
-def write_bpe_vocab(tokens: Path, out: Path) -> None:
-    """sherpa needs a sentencepiece vocab to turn hotwords into tokens; the export ships none.
-
-    The score is minus the token id, so lower ids win where pieces compete."""
-    lines: list[str] = []
-    for n, line in enumerate(tokens.read_text(encoding="utf-8").splitlines(), start=1):
-        piece, _, token_id = line.rpartition(" ")
-        if not piece or not token_id.isdigit():
-            raise InstallError(f"{tokens}:{n}: expected '<piece> <id>'")
-        lines.append(f"{piece}\t{-int(token_id)}\n")
-    out.write_text("".join(lines), encoding="utf-8")
 
 
 def _download(opener: Opener, dest: Path, progress: TextIO) -> None:

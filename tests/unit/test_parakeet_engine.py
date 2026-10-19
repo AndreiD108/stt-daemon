@@ -3,6 +3,7 @@
 import asyncio
 import threading
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -44,33 +45,26 @@ async def _until(check: Any, timeout: float = 2.0) -> None:
 
 
 class _Recognizer:
-    """Decodes any audio to its sample count; records hotwords and how many decode at once."""
+    """Decodes any audio to its sample count; records keyterms and how many decode at once."""
 
     def __init__(self, key: RecognizerKey, decode_s: float = 0.0) -> None:
         self.key = key
         self.decode_s = decode_s
-        self.hotwords: list[str | None] = []
+        self.terms: list[tuple[str, ...]] = []
         self.running = 0
         self.most_running = 0
         self._count = threading.Lock()
 
-    def create_stream(self, hotwords: str | None = None) -> Any:
-        self.hotwords.append(hotwords)
-
-        class Stream:
-            def accept_waveform(self, rate: int, audio: Samples) -> None:
-                text = f" {len(audio)}"
-                self.result = Decoded(text, [text], [0.0], [0.1])
-
-        return Stream()
-
-    def decode_stream(self, stream: Any) -> None:
+    def decode(self, audio: Samples, terms: Sequence[str]) -> Decoded:
+        self.terms.append(tuple(terms))
         with self._count:
             self.running += 1
             self.most_running = max(self.most_running, self.running)
         time.sleep(self.decode_s)
         with self._count:
             self.running -= 1
+        text = f" {len(audio)}"
+        return Decoded(text, [text], [0.0], [0.1])
 
 
 class _Loader:
@@ -142,7 +136,7 @@ async def test_sessions_share_one_recognizer_and_decode_in_turn(tmp_path: Path) 
     await _until(lambda: len(events) == 6)
     [recognizer] = loader.made
     assert recognizer.most_running == 1
-    assert sorted(recognizer.hotwords, key=str) == [None] * 3 + ["Scribbly/Talkey"] * 3
+    assert sorted(recognizer.terms) == [()] * 3 + [("Scribbly", "Talkey")] * 3
     await a.close()
     await b.close()
     c = await jargon.open(OpenOptions(), 3, events.append)
@@ -363,7 +357,7 @@ async def test_a_dictation_decode_goes_before_waiting_decodes_of_others() -> Non
     done: list[str] = []
 
     async def decode(name: str, *, first: bool) -> None:
-        await engine.decode(recognizer, _audio(0.2), None, first=first)
+        await engine.decode(recognizer, _audio(0.2), (), first=first)
         done.append(name)
 
     running = asyncio.create_task(decode("file", first=False))

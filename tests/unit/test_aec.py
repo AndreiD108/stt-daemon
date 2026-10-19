@@ -5,7 +5,18 @@ import time
 
 import numpy as np
 import pytest
-from aec_fixture import FIXTURES, NEAR_PHRASES, RATE, Audio, Fixture, build, echo_of, read, room_ir
+from aec_fixture import (
+    FAR_ONLY,
+    FIXTURES,
+    NEAR_PHRASES,
+    RATE,
+    Audio,
+    Fixture,
+    build,
+    echo_of,
+    read,
+    room_ir,
+)
 
 from stt_daemon.audio.aec import EchoCanceller
 from stt_daemon.backends.install import is_installed
@@ -157,14 +168,16 @@ def test_parakeet_hears_every_near_end_word_in_the_cancelled_audio_that_it_hears
         heard: set[str] = set()
         # Each phrase on its own, padded as the pause gate sends it.
         for start, end in NEAR_PHRASES:
-            stream = recognizer.create_stream()
-            stream.accept_waveform(RATE, audio[span((start - 0.1, end + 0.2))].astype(np.float32))
-            recognizer.decode_stream(stream)
-            heard |= words(stream.result.text)
+            clip = audio[span((start - 0.1, end + 0.2))].astype(np.float32)
+            heard |= words(recognizer.decode(clip, ()).text)
         return heard
 
     clean = transcribe(fixture.near) & words(EXPECTED)
     assert len(clean) >= len(words(EXPECTED)) // 2, clean
     out, _ = cancelled
     assert clean - transcribe(out) == set()
-    assert transcribe(fixture.mixed) & clean != clean
+    # The echo alone is heard as words until it is cancelled (past the first stretch, where
+    # the canceller is still learning the room).
+    for start, end in FAR_ONLY[1:]:
+        assert recognizer.decode(fixture.mixed[span((start, end))].astype(np.float32), ()).text
+        assert not recognizer.decode(out[span((start, end))].astype(np.float32), ()).text

@@ -7,7 +7,7 @@ from typing import BinaryIO
 import pytest
 
 from stt_daemon.backends import install
-from stt_daemon.backends.install import InstallError, install_parakeet, write_bpe_vocab
+from stt_daemon.backends.install import InstallError, install_parakeet
 from stt_daemon.backends.parakeet import MODEL_FILES
 
 TOKENS = "<unk> 0\n▁the 1\nest 2\n, 3\n"
@@ -52,21 +52,6 @@ def _serve(monkeypatch: pytest.MonkeyPatch, data: bytes, *, digest: bytes | None
     return _Opener(data)
 
 
-def test_bpe_vocab_scores_are_minus_the_token_id(tmp_path: Path) -> None:
-    tokens = tmp_path / "tokens.txt"
-    tokens.write_text(TOKENS + "  1000\n")
-    write_bpe_vocab(tokens, tmp_path / "bpe.vocab")
-    lines = (tmp_path / "bpe.vocab").read_text().splitlines()
-    assert lines == ["<unk>\t0", "▁the\t-1", "est\t-2", ",\t-3", " \t-1000"]
-
-
-def test_bpe_vocab_refuses_a_line_without_an_id(tmp_path: Path) -> None:
-    tokens = tmp_path / "tokens.txt"
-    tokens.write_text("<unk> 0\nbroken\n")
-    with pytest.raises(InstallError, match=r"tokens.txt:2"):
-        write_bpe_vocab(tokens, tmp_path / "bpe.vocab")
-
-
 def test_install_unpacks_the_model_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     opener = _serve(monkeypatch, _model_archive())
     target = tmp_path / "models" / "parakeet"
@@ -74,7 +59,6 @@ def test_install_unpacks_the_model_once(tmp_path: Path, monkeypatch: pytest.Monk
     assert install_parakeet(target, opener, progress) == (target, True)
     assert sorted(p.name for p in target.iterdir()) == sorted(MODEL_FILES)
     assert (target / "joiner.int8.onnx").read_bytes() == b"join"
-    assert (target / "bpe.vocab").read_text().splitlines()[1] == "▁the\t-1"
     assert "100%" in progress.getvalue()
     assert [p.name for p in target.parent.iterdir()] == ["parakeet"]
 

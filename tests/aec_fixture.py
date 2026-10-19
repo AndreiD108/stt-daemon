@@ -49,7 +49,11 @@ def room_ir(delay_s: float = ECHO_DELAY_S, *, seed: int = 7) -> Audio:
 
 
 def echo_of(far: Audio, ir: Audio, gain_db: float = ECHO_GAIN_DB) -> Audio:
-    return np.convolve(far, ir)[: far.size] * 10 ** (gain_db / 20)
+    # Through the FFT: np.convolve does one BLAS dot per sample, which multithreaded OpenBLAS
+    # turns into minutes of spinning threads.
+    n = far.size + ir.size - 1
+    echo = np.fft.irfft(np.fft.rfft(far, n) * np.fft.rfft(ir, n), n)
+    return echo[: far.size] * 10 ** (gain_db / 20)
 
 
 def clip(audio: Audio, start_s: float, end_s: float) -> Audio:

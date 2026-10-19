@@ -19,7 +19,6 @@ from stt_daemon.backends.parakeet import (
     ParakeetBackend,
     ParakeetConnection,
     group_words,
-    hotwords,
     model_dir,
 )
 from stt_daemon.config import Config
@@ -59,12 +58,6 @@ def test_tokens_with_a_leading_space_start_words() -> None:
 def test_a_first_token_without_a_space_starts_a_word() -> None:
     decoded = _decoded(("Hi", 0.0, 0.1), (" there", 0.2, 0.2))
     assert group_words(decoded, 0.0) == (Word("Hi", 0.0, 0.1), Word("there", 0.2, 0.4))
-
-
-def test_hotwords_join_phrases_and_drop_slashes_and_blanks() -> None:
-    assert hotwords(["stt-daemon", "sherpa  onnx", "a/b", " "]) == "stt-daemon/sherpa onnx/a b"
-    assert hotwords([]) is None
-    assert hotwords(["/"]) is None
 
 
 class _Decoder:
@@ -175,6 +168,6 @@ def test_create_needs_every_model_file(tmp_path: Path, monkeypatch: pytest.Monke
     assert caught.value.code == "no_model"
     model = _model(tmp_path)
     assert isinstance(ParakeetBackend.create(Config(), Credentials()), ParakeetBackend)
-    (model / "bpe.vocab").unlink()
+    (model / "joiner.int8.onnx").unlink()
     with pytest.raises(BackendUnavailable):
         ParakeetBackend.create(Config(), Credentials())

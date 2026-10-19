@@ -1,7 +1,7 @@
-"""NVIDIA Parakeet TDT 0.6B v3 on this machine, through sherpa-onnx.
+"""NVIDIA Parakeet TDT 0.6B v3 on this machine (the sherpa-onnx int8 export, run by `tdt`).
 
 An after-the-fact backend: audio is buffered and each commit decodes what came since the last one,
-in a worker thread. Beam search; a session's keyterms go in as hotwords on each decode.
+in a worker thread. Beam search; a session's keyterms are boosted on each decode.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from ..config import Config, ParakeetConfig, data_dir
 from ..credentials import Credentials
 from .base import (
     PAUSE_STEPS,
-    SAMPLE_RATE,
     Backend,
     BackendUnavailable,
     Capabilities,
@@ -30,18 +29,18 @@ from .base import (
     merge_keyterms,
 )
 from .chunked import Chunk, ChunkedConnection, Transcribed, Turns
+from .tdt import FRAME_S, WORD_START, TdtModel, beam_search, keyterms
 
 log = logging.getLogger(__name__)
 
 MODEL_NAME = "parakeet-tdt-0.6b-v3-int8"
-ENCODER, DECODER, JOINER, TOKENS, BPE_VOCAB = (
+ENCODER, DECODER, JOINER, TOKENS = (
     "encoder.int8.onnx",
     "decoder.int8.onnx",
     "joiner.int8.onnx",
     "tokens.txt",
-    "bpe.vocab",
 )
-MODEL_FILES = (ENCODER, DECODER, JOINER, TOKENS, BPE_VOCAB)
+MODEL_FILES = (ENCODER, DECODER, JOINER, TOKENS)
 CAPABILITIES = Capabilities(
     languages=("auto",),
     word_timestamps=True,
@@ -76,32 +75,25 @@ class RecognizerKey:
 type Loader = Callable[[RecognizerKey], Any]
 
 
-def load_recognizer(key: RecognizerKey) -> Any:
-    import sherpa_onnx
+class Recognizer:
+    def __init__(self, key: RecognizerKey) -> None:
+        self._model = TdtModel(key.model, key.num_threads)
+        self._score = key.hotwords_score
 
-    m = key.model
-    return sherpa_onnx.OfflineRecognizer.from_transducer(
-        encoder=str(m / ENCODER),
-        decoder=str(m / DECODER),
-        joiner=str(m / JOINER),
-        tokens=str(m / TOKENS),
-        num_threads=key.num_threads,
-        decoding_method="modified_beam_search",
-        model_type="nemo_transducer",
-        modeling_unit="bpe",
-        bpe_vocab=str(m / BPE_VOCAB),
-        hotwords_score=key.hotwords_score,
-    )
+    def decode(self, audio: Samples, terms: Sequence[str]) -> Decoded:
+        model = self._model
+        boost = keyterms(model, list(terms), self._score) if terms else None
+        found = beam_search(model, model.encode(audio), boost)
+        return Decoded(
+            model.text(found.ids),
+            [model.pieces[t].replace(WORD_START, " ") for t in found.ids],
+            [f * FRAME_S for f in found.frames],
+            [d * FRAME_S for d in found.durations],
+        )
 
 
-def _decode(recognizer: Any, audio: Samples, hotwords: str | None) -> Decoded:
-    stream = recognizer.create_stream(hotwords) if hotwords else recognizer.create_stream()
-    stream.accept_waveform(SAMPLE_RATE, audio)
-    recognizer.decode_stream(stream)
-    result = stream.result
-    return Decoded(
-        result.text, list(result.tokens), list(result.timestamps), list(result.durations)
-    )
+def load_recognizer(key: RecognizerKey) -> Recognizer:
+    return Recognizer(key)
 
 
 class Engine:
@@ -171,7 +163,7 @@ class Engine:
         self._recognizer, self._key = None, None
 
     async def decode(
-        self, recognizer: Any, audio: Samples, hotwords: str | None, *, first: bool = False
+        self, recognizer: Any, audio: Samples, terms: Sequence[str], *, first: bool = False
     ) -> Decoded:
         """`first`: a dictation's decode, which goes before every waiting decode of others."""
         # A decode counts as a user until its thread is done, even if its caller is cancelled.
@@ -182,7 +174,7 @@ class Engine:
             self.release()
             raise
         try:
-            work = asyncio.ensure_future(asyncio.to_thread(_decode, recognizer, audio, hotwords))
+            work = asyncio.ensure_future(asyncio.to_thread(recognizer.decode, audio, terms))
         except BaseException:
             self._decoding.release()
             self.release()
@@ -232,12 +224,6 @@ def group_words(decoded: Decoded, offset_s: float) -> tuple[Word, ...]:
     return tuple(words)
 
 
-def hotwords(terms: Sequence[str]) -> str | None:
-    """sherpa's per-stream form: phrases split by "/", words by spaces."""
-    phrases = [" ".join(t.replace("/", " ").split()) for t in terms]
-    return "/".join(p for p in phrases if p) or None
-
-
 def missing_file(model: Path) -> Path | None:
     return next((model / f for f in MODEL_FILES if not (model / f).is_file()), None)
 
@@ -285,7 +271,7 @@ class ParakeetBackend(Backend):
             )
         if (missing := missing_file(self._model)) is not None:
             raise OpenFailed("model_error", _not_installed(missing), retryable=False)
-        terms = hotwords(merge_keyterms(self._config.keyterms, options.keyterms))
+        terms = tuple(merge_keyterms(self._config.keyterms, options.keyterms))
         key = RecognizerKey(self._model, self._config.num_threads, self._config.hotwords_score)
         unload_after_s = self._config.unload_after_minutes * 60 or None
         loading = self._engine.acquire(key, unload_after_s)

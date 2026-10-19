@@ -153,12 +153,8 @@ def transcripts(tracks: dict[str, np.ndarray]) -> dict[str, list[str]]:
     for mode in MODES:
         heard[mode] = []
         for start, end in READS_S:
-            stream = recognizer.create_stream()
-            stream.accept_waveform(
-                RATE, tracks[mode][round(start * RATE) : round(end * RATE)].astype(np.float32)
-            )
-            recognizer.decode_stream(stream)
-            heard[mode].append(stream.result.text)
+            clip = tracks[mode][round(start * RATE) : round(end * RATE)].astype(np.float32)
+            heard[mode].append(recognizer.decode(clip, ()).text)
     return heard
 
 

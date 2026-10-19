@@ -128,8 +128,9 @@ async def test_keyterms_go_in_per_stream(daemon: Harness) -> None:
     assert len(loaded) == 1
     texts = [s["text"] for s in segments if s["text"]]
     assert len(texts) == 2, texts
-    assert "pen marks" in texts[0].lower()
-    assert "routes the mic" in texts[1]
+    # Without keyterms: "Talkie", "Pipewire".
+    assert "Talkey" in texts[0]
+    assert "PipeWire" in texts[1]
     assert ended["final_text"]
 
 
