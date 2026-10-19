@@ -58,9 +58,99 @@ def test_the_command_records_the_default_outputs_monitor_or_a_target() -> None:
     assert default[0] == "pw-record"
     assert default[default.index("-P") + 1] == "{ stream.capture.sink = true }"
     assert default[-1] == "-"
-    targeted = pw_record_command("alsa_output.usb")
-    assert targeted[targeted.index("--target") + 1] == "alsa_output.usb"
-    assert "-P" not in targeted
+    targeted = pw_record_command("4711")
+    assert targeted[targeted.index("--target") + 1] == "4711"
+    props = targeted[targeted.index("-P") + 1]
+    assert "node.dont-fallback = true" in props
+    assert "node.dont-reconnect = true" in props
+    assert "stream.capture.sink" not in props
+
+
+class StubTarget:
+    """An app's stream: `playing` is its serial, None while it is gone."""
+
+    def __init__(self, serial: str) -> None:
+        self.serial = serial
+        self.playing: str | None = serial
+        self.back = asyncio.Event()
+
+    def current(self) -> str | None:
+        return self.playing
+
+    async def appeared(self) -> str:
+        await self.back.wait()
+        assert self.playing is not None
+        return self.playing
+
+
+def following(tmp_path: Path, target: StubTarget, **kwargs: object) -> PwRecordCapture:
+    """A capture whose stand-in exits once its target serial leaves the `live` file."""
+    log, live = tmp_path / "starts", tmp_path / "live"
+    live.write_text(f"{target.serial}\n")
+
+    def command(serial: str | None) -> list[str]:
+        assert serial is not None
+        return fake("--log", str(log), "--target", serial, "--live", str(live))
+
+    return PwRecordCapture(command, target=target, backoff_s=(0.05,))
+
+
+async def test_a_followed_app_that_goes_is_waited_for_then_captured_on_its_new_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = StubTarget("11")
+    capture = following(tmp_path, target)
+    recorder = Recorder(capture)
+    queue = capture.attach().queue
+    await capture.hold()
+    try:
+        await asyncio.wait_for(queue.get(), 5)
+        delays = record_backoff(monkeypatch)
+        target.playing = None
+        (tmp_path / "live").write_text("")
+        await until(lambda: bool(recorder.events))
+        assert recorder.events[0].startswith("lost: ")
+        await REAL_SLEEP(0.3)
+        assert (tmp_path / "starts").read_text().splitlines() == ["start 11"]
+        (tmp_path / "live").write_text("12\n")
+        target.playing = "12"
+        target.back.set()
+        await until(lambda: recorder.events[-1] == "restored")
+        assert (tmp_path / "starts").read_text().splitlines() == ["start 11", "start 12"]
+        assert delays == []
+        assert capture.command[capture.command.index("--target") + 1] == "12"
+    finally:
+        await capture.release()
+
+
+async def test_a_followed_stream_that_is_still_there_is_restarted_with_backoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = StubTarget("11")
+    capture = following(tmp_path, target)
+    log = tmp_path / "starts"
+    delays = record_backoff(monkeypatch)
+    (tmp_path / "live").write_text("")  # each start exits at once, the stream stays listed
+    await capture.hold()
+    try:
+        await until(lambda: log.exists() and len(log.read_text().splitlines()) >= 3)
+    finally:
+        await capture.release()
+    assert len(delays) >= 2
+    assert set(log.read_text().splitlines()) == {"start 11"}
+
+
+async def test_release_while_waiting_for_the_app_ends_the_wait(tmp_path: Path) -> None:
+    target = StubTarget("11")
+    capture = following(tmp_path, target)
+    recorder = Recorder(capture)
+    await capture.hold()
+    target.playing = None
+    (tmp_path / "live").write_text("")
+    await until(lambda: bool(recorder.events))
+    began = time.monotonic()
+    await capture.release()
+    assert time.monotonic() - began < 1
 
 
 async def test_frames_carry_the_samples_in_order_and_never_overlap() -> None:

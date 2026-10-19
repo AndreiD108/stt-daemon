@@ -33,6 +33,7 @@ class Connection:
     writer: asyncio.StreamWriter
     observe_all: bool = False
     vad_events: bool = False
+    sources: bool = False
     closed: bool = False
     worker: asyncio.Task[None] | None = None
 

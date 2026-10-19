@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 
 from stt_daemon.audio.capture import CaptureSource
-from stt_daemon.audio.pw_capture import PwRecordCapture
+from stt_daemon.audio.pw_capture import AppTarget, PwRecordCapture
 from stt_daemon.audio.wav_capture import WavCapture
 from stt_daemon.backends.base import Backend, CommitPolicy
 from stt_daemon.backends.fake import FAKE_CAPABILITIES, FakeBackend, FakeReply
@@ -21,6 +21,8 @@ from stt_daemon.config import Config
 from stt_daemon.credentials import Credentials
 from stt_daemon.server.backend_set import Setup, load_setup
 from stt_daemon.server.socket import Server
+from stt_daemon.server.sources import SourceScan
+from stt_daemon.server.starts import system_capture as real_system_capture
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "two_phrases.wav"
 """TTS speech, 16 kHz: phrases at 1.00-3.74 s and 5.74-7.81 s."""
@@ -133,8 +135,10 @@ class Harness:
         capture: CaptureSource | None = None,
         config: Config | None = None,
         backends: dict[str, Backend] | None = None,
-        system_capture: Callable[[], PwRecordCapture] | None = None,
+        system_capture: Callable[[AppTarget | None], PwRecordCapture] | None = None,
+        sources: SourceScan | None = None,
     ) -> Server:
+        """Without `sources`, no source scan runs."""
         config = config or Config()
         if backends is None:
             backends = {"fake": backend or fake()}
@@ -145,7 +149,8 @@ class Harness:
             capture=capture,
             setup=setup_with(config, backends),
             reload_setup=self._reload,
-            system_capture=system_capture or PwRecordCapture,
+            system_capture=system_capture or real_system_capture,
+            sources=sources or SourceScan(enabled=False),
         )
         await server.start()
         return server

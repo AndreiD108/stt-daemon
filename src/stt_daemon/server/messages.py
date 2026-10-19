@@ -40,6 +40,7 @@ class Hello:
     label: str | None
     observe_all: bool
     vad_events: bool
+    sources: bool = False
 
 
 @dataclass(frozen=True)
@@ -68,6 +69,8 @@ class TranscribeRequest:
 class SystemRequest:
     start: StartRequest
     with_mic: bool = False
+    app: str | None = None
+    """A source id from `welcome.sources` or `source_added`."""
 
 
 @dataclass(frozen=True)
@@ -122,6 +125,7 @@ def parse_hello(data: Mapping[str, Any]) -> Hello:
         label=fields.text("label") or None,
         observe_all=fields.flag("observe_all"),
         vad_events=fields.flag("vad_events"),
+        sources=fields.flag("sources"),
     )
 
 
@@ -184,7 +188,8 @@ def parse_system(data: Mapping[str, Any]) -> SystemRequest:
             "start_system_session takes no speech_id; it starts at the command",
             field="speech_id",
         )
-    return SystemRequest(parse_start(data), _Fields(data, "bad_request").flag("with_mic"))
+    fields = _Fields(data, "bad_request")
+    return SystemRequest(parse_start(data), fields.flag("with_mic"), fields.text("app"))
 
 
 def parse_audio(data: Mapping[str, Any]) -> bytes:

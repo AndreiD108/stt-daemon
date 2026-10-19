@@ -7,7 +7,7 @@ from collections.abc import Callable, Generator
 from dataclasses import dataclass
 
 from ..audio.capture import CaptureSource, CaptureUnavailable
-from ..audio.pw_capture import PwRecordCapture
+from ..audio.pw_capture import AppTarget, PwRecordCapture
 from ..audio.stream_capture import ByteStreamCapture, ToolMissing, ffmpeg_command
 from ..backends.base import FileBackend, OpenFailed
 from ..service.preflight import check_tool
@@ -20,7 +20,12 @@ from .connection import Connection
 from .messages import Message, MessageId, RequestError, parse_start, parse_system, parse_transcribe
 from .slot import AnySession, ClientGone, Slot
 from .slot_state import StartRefused
+from .sources import Source, SourceScan
 from .speech import SpeechWatch
+
+
+def system_capture(target: AppTarget | None) -> PwRecordCapture:
+    return PwRecordCapture(target=target)
 
 
 @dataclass(eq=False)
@@ -36,6 +41,8 @@ class Running:
     """The `stop_session` or `cancel_session` that `session_ended` replies to."""
     stream: ByteStreamCapture | UploadSession | None = None
     """A `transcribe` session's input."""
+    app: Source | None = None
+    """The app a `system` session captures."""
 
 
 class Starts:
@@ -47,7 +54,8 @@ class Starts:
     _contexts: ContextStore
     _slot: Slot
     _speech: SpeechWatch
-    _system_capture: Callable[[], PwRecordCapture]
+    _system_capture: Callable[[AppTarget | None], PwRecordCapture]
+    _sources: SourceScan
 
     async def _start(self, conn: Connection, message: Message, arrived: float) -> None:
         request = parse_start(message.data)
@@ -138,6 +146,13 @@ class Starts:
             raise RequestError(
                 "unsupported", f"this daemon can't capture system audio on {sys.platform}"
             )
+        app = None
+        if request.app is not None and (app := self._sources.get(request.app)) is None:
+            raise RequestError(
+                "invalid",
+                f"no source {request.app!r}; pick an id from welcome.sources or source_added",
+                field="app",
+            )
         setup = self.setup
         cid = conn.client.client_id
         scope = scope_of(cid, conn.client.label)
@@ -146,7 +161,7 @@ class Starts:
             resolved = resolve(
                 setup, request.start, lambda key: self._contexts.get(scope, key), kind="system"
             )
-            capture = self._system_capture()
+            capture = self._system_capture(None if app is None else self._sources.follow(app))
             tool = capture.command[0]
             if (problem := check_tool(tool)) is not None:
                 raise RequestError("tool_unavailable", problem, tool=tool)
@@ -160,7 +175,7 @@ class Starts:
                 mic=self.capture if request.with_mic else None,
             )
             self._running[cid] = Running(
-                conn, session, request.start.label, resolved.context_key, message.id
+                conn, session, request.start.label, resolved.context_key, message.id, app=app
             )
             return session
 

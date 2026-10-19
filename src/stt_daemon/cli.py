@@ -178,6 +178,8 @@ def _service(args: argparse.Namespace) -> int:
                 print(f"`stt-daemon transcribe` needs ffmpeg: {problem}")
             if sys.platform == "linux" and (problem := check_tool("pw-record")):
                 print(f"system audio sessions need pw-record: {problem}")
+            if sys.platform == "linux" and (problem := check_tool("pw-dump")):
+                print(f"picking one app's audio needs pw-dump: {problem}")
             print(BACKEND_SETUP)
         case "remove":
             removed = manager.remove()

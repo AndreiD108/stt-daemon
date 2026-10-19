@@ -70,7 +70,7 @@ events, send `stop_session`, read `session_ended`. Error codes are in [Error cod
 ### `hello`
 
 ```json
-{"protocol": 1, "label": "Scribbly", "observe_all": false, "vad_events": true}
+{"protocol": 1, "label": "Scribbly", "observe_all": false, "vad_events": true, "sources": true}
 ```
 
 - `label` (optional): shown to other clients in `slot`; also scopes `context_key`. `""` is no
@@ -80,6 +80,8 @@ events, send `stop_session`, read `session_ended`. Error codes are in [Error cod
   `server.observers = false`.
 - `vad_events` (optional, default false): receive `speech_started` and `speech_ended`; see
   [VAD events](#vad-events).
+- `sources` (optional, default false): receive `source_added` and `source_removed`; see
+  [Sources](#sources). Observers get them only with this flag too.
 
 Reply: `welcome`. Or, and the daemon closes the connection: `error {code: "protocol_unsupported",
 supported: [1]}`, `observers_disabled`, or `bad_request` for a field of the wrong type. A second `hello` gets
@@ -226,17 +228,21 @@ Reply: `session_started` (`kind: "transcribe"`), or `error` with one of the star
 ### `start_system_session`
 
 ```json
-{"backend": "parakeet", "with_mic": true, "word_timestamps": true}
+{"backend": "parakeet", "with_mic": true, "word_timestamps": true, "app": "src_7"}
 ```
 
 Starts a `system` session: it transcribes what the machine plays, from the default output (it
-follows the user's output switches), until `stop_session` or `cancel_session`. All fields
+follows the user's output switches) or from one application, until `stop_session` or
+`cancel_session`. All fields
 optional. `label`, `backend`, `language`, `keyterms`, `previous_text`, `context_key`, `partials`
 and `word_timestamps` work as for `start_session`; `speech_id` is refused (`bad_request`); the
 session starts at the command.
 
 - `with_mic` (default false): also transcribe the mic, as a second track. The mic track takes no
   mic slot, so dictation runs next to it. With speakers on, the mic also hears what they play.
+- `app` (optional): a source id from `welcome.sources` or `source_added` (see [Sources](#sources)).
+  The system track then captures only that application's stream. An id the daemon doesn't list
+  now gives `invalid` with `field: "app"`. Works the same with `with_mic`.
 
 Each track (`system`, and `mic` with `with_mic`) runs on its own: its own pause cuts, commits,
 backend connection (or, on Parakeet, its own turns on the shared model) and reconnects, on the
@@ -259,16 +265,23 @@ until audio comes again: `session_error {code: "capture_restored", track, fatal:
 backend error on either track ends the session, with the text of both tracks. `session_started`
 waits up to 2 s for the first system audio; if none comes, `capture_lost` follows it.
 
+With `app`, the track ends with the application's stream (the app closed, or stopped playing).
+The client gets `capture_lost`, and the daemon does not retry against the gone stream: it waits
+until a source of the same application appears (same `binary`; same `name` when the source had no
+`binary`), captures that stream, and sends `capture_restored`. A new source of that app while the
+session is suspended is picked up the same way; the audio is there on the resume.
+
 `stop_session` commits both tracks and waits as for a mic session. While suspended for a dictation,
 both tracks keep their audio, and a stop finishes after the resume, as for
 [`stop_session`](#stop_session) after a suspension.
 
-Checks run in this order: field types (`bad_request`), the platform (`unsupported`), this client's
-session (`session_active`), the backend, language and features, `pw-record`
+Checks run in this order: field types (`bad_request`), the platform (`unsupported`), `app`
+(`invalid`), this client's session (`session_active`), the backend, language and features, `pw-record`
 (`tool_unavailable`), then room on the backend (`busy`, `full_slot: "backend"`). With `with_mic`,
 a mic that doesn't open gives `mic_unavailable`.
 
-Reply: `session_started` (`kind: "system"`, with `tracks`), or `error` with one of the start codes.
+Reply: `session_started` (`kind: "system"`, with `tracks`; with `app`, also `app` and `app_name`),
+or `error` with one of the start codes.
 
 ### `audio`
 
@@ -396,7 +409,8 @@ sent during a slow start waits for the start; a `ping` doesn't).
   ],
   "default_backend": "elevenlabs",
   "mic_open": true,
-  "slot": {"state": "idle", "backends": {"elevenlabs": {"max_sessions": 2, "sessions": []}}}
+  "slot": {"state": "idle", "backends": {"elevenlabs": {"max_sessions": 2, "sessions": []}}},
+  "sources": [{"id": "src_7", "name": "Zoom", "binary": "zoom", "media_name": "Playback"}]
 }
 ```
 
@@ -414,6 +428,8 @@ sent during a slow start waits for the start; a `ping` doesn't).
 - `mic_open`: the daemon keeps the mic open between sessions (config `audio.keep_mic_open`,
   default true). When false, the mic opens at each start: VAD events flow only during sessions,
   sessions start at the command, and each start waits for the device.
+- `sources`: the applications playing audio now; see [Sources](#sources). Always present, `[]`
+  off Linux.
 
 ### `backends`
 
@@ -491,6 +507,8 @@ released, and when a `reload` changes the backends or their `max_sessions`.
 
 - `kind`: `mic`, `system` or `transcribe`; see the intro.
 - `tracks`: only for a `system` session: `["system"]`, or `["system", "mic"]` with `with_mic`.
+- `app`, `app_name`: only for a `system` session started with `app`: the source id, and that
+  source's `name`.
 - `started_at`: capture time of the session's first sample. For `transcribe`, the time the
   session started; its session times count from there in audio time.
 - `previous_text`: the context hint the session uses, from the command or the `context_key` store,
@@ -659,7 +677,7 @@ Codes of `error` replies, and of `session_error` for the backend codes.
 | `tool_unavailable` | `transcribe`, `start_system_session` | A program the daemon needs isn't installed; `tool` names it (`ffmpeg`, `pw-record`), the message gives the install command. A `transcribe` with raw 16 kHz mono `pcm` needs none. |
 | `no_session` | `add_marker`, `audio`, `stop_session`, `cancel_session` | No session, or it is already ending. |
 | `session_stopping` | `add_marker` | The session is ending. |
-| `invalid` | `add_marker`, `audio` | `marker` missing or blank, or `data` not base64 or over 1 MiB; `field` names the field. |
+| `invalid` | `add_marker`, `audio`, `start_system_session` | `marker` missing or blank, `data` not base64 or over 1 MiB, or `app` not a listed source; `field` names the field. |
 | `out_of_range` | `add_marker` | `at` is before `started_at`. |
 | `config` | `reload` | Config or credentials invalid; the last setup stays. |
 | `capture_lost`, `capture_restored` | `session_error`, `fatal: false` | A `system` session's track stopped getting audio, or gets it again; `track` names it. The session goes on. |
@@ -718,6 +736,36 @@ on CPU the whole time the mic is open, and it reports speech:
   speech's start is still in the buffer, so a start right at `expires_at` can go either way.
 - A client can drive sessions from these alone: start on `speech_started`, stop on `speech_ended`
   or later. The daemon doesn't stop sessions on its own.
+
+## Sources
+
+On Linux the daemon watches which applications play audio, through `pw-dump` (PipeWire's tools):
+each playback stream is a source. `welcome.sources` lists them, and clients that sent
+`sources: true` get these events as streams appear and go:
+
+`source_added`:
+
+```json
+{"source": {"id": "src_7", "name": "Zoom", "binary": "zoom", "media_name": "Playback"}}
+```
+
+`source_removed`:
+
+```json
+{"id": "src_7"}
+```
+
+- `id`: the daemon's id for the stream, kept while the stream lives and never reused. Ids hold for
+  one daemon run; after a reconnect, read `welcome.sources` again. When `pw-dump` exits, every
+  source gets `source_removed`; once it runs again, the streams come back as new sources.
+- `name`: the application's name, else the stream's node name. `binary`: the program, `null` when
+  PipeWire doesn't say. `media_name`: what the stream says it plays (a title, `Playback`); `null`
+  when unset.
+- One application can have several sources (a browser can have one per tab that plays). A source
+  goes when the app closes its stream, which some apps do when they pause; playing again is then
+  a new source.
+- Without `pw-dump`, or while it isn't running, `sources` is empty and no events come; the daemon
+  tries again every 30 s. Off Linux, `sources` is always empty.
 
 ## Observers
 

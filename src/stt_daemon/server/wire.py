@@ -15,6 +15,7 @@ from ..session.events import (
 from ..session.markers import TimedWord
 from ..session.transcript import Segment
 from .slot_state import Client
+from .sources import SourceAdded, SourceEvent
 
 type Wire = tuple[str, dict[str, object]]
 
@@ -91,6 +92,12 @@ def vad_event(event: VadEvent, buffer_ms: int) -> Wire:
             "expires_at": at + buffer_ms,
         }
     return "speech_ended", {"speech_id": event.speech_id, "at": at}
+
+
+def source_event(event: SourceEvent) -> Wire:
+    if isinstance(event, SourceAdded):
+        return "source_added", {"source": event.source.to_wire()}
+    return "source_removed", {"id": event.source.id}
 
 
 def segment(seg: Segment, session_id: str) -> dict[str, object]:

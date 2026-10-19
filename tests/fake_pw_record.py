@@ -1,6 +1,8 @@
 """A stand-in for `pw-record`: s16 mono 16 kHz on stdout in real time, from a WAV, then silence.
 
-Each start appends a line to `--log`, so a test can count restarts and script the nth start.
+Each start appends a line to `--log` (with its `--target`), so a test can count restarts and
+script the nth start. With `--live`, it exits as `pw-record` does once its target isn't in that
+file (one serial per line) any more.
 """
 
 import argparse
@@ -21,12 +23,14 @@ def main() -> None:
     parser.add_argument("--exit-after", type=float, help="exit after this many seconds")
     parser.add_argument("--stall-after", type=float, help="stop writing, stay alive")
     parser.add_argument("--only-starts", type=int, default=0, help="the limits hit these starts")
+    parser.add_argument("--target")
+    parser.add_argument("--live", type=Path, help="serials of the streams that exist")
     args = parser.parse_args()
     start = 0
     if args.log is not None:
         start = len(args.log.read_text().splitlines()) if args.log.exists() else 0
         with args.log.open("a") as log:
-            log.write("start\n")
+            log.write(f"start {args.target}\n" if args.target else "start\n")
     limited = args.only_starts == 0 or start < args.only_starts
     pcm = b""
     if args.wav is not None:
@@ -36,6 +40,9 @@ def main() -> None:
     sent = 0
     out = sys.stdout.buffer
     while True:
+        if args.live is not None and args.target not in args.live.read_text().split():
+            print("stream node: error: defined target not found", file=sys.stderr)
+            sys.exit(1)
         elapsed = time.monotonic() - began
         if limited and args.exit_after is not None and elapsed >= args.exit_after:
             return

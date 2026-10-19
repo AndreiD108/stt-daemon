@@ -216,6 +216,7 @@ def test_pw_record_hint_names_the_distro_package(
     path = tmp_path / "os-release"
     path.write_text(os_release)
     assert install_hint("linux", path, package="pw-record") == command
+    assert install_hint("linux", path, package="pw-dump") == command
 
 
 def test_pw_record_hint_without_a_known_distro_or_on_macos_names_the_tool(tmp_path: Path) -> None:

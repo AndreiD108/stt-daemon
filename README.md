@@ -101,6 +101,11 @@ out as one transcript, each line marked `[system]` or `[mic]`. It runs next to y
 takes no mic slot. It needs `pw-record`, from your distribution's PipeWire tools;
 `stt-daemon service install` names the package when it is missing.
 
+To take one application's audio only, say the call app and not the music next to it, a client
+picks it from the sources the daemon lists (every app that plays audio, with its name) and starts
+the session with that app's id. When the app stops playing and starts again, the session picks
+it up again on its own.
+
 ## Update
 
 ```sh

@@ -45,10 +45,12 @@ _PACKAGES = {
         "zypper": "pipewire-tools",
     },
 }
+_PACKAGES["pw-dump"] = _PACKAGES["pw-record"]
 _FALLBACK = {
     "portaudio": "PortAudio (libportaudio.so.2) from your distribution's packages",
     "ffmpeg": "ffmpeg from your distribution's packages",
     "pw-record": "the PipeWire command-line tools (pw-record) from your distribution's packages",
+    "pw-dump": "the PipeWire command-line tools (pw-dump) from your distribution's packages",
 }
 
 

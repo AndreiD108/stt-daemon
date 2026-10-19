@@ -68,6 +68,8 @@ def test_hello_options() -> None:
     assert (hello.label, hello.observe_all, hello.vad_events) == ("Talkey", True, False)
     assert parse_hello({"protocol": 1, "label": ""}).label is None
     assert code_of(parse_hello, {"protocol": 1, "vad_events": 1}) == ("bad_request", "vad_events")
+    assert parse_hello({"protocol": 1, "sources": True}).sources is True
+    assert code_of(parse_hello, {"protocol": 1, "sources": "yes"}) == ("bad_request", "sources")
 
 
 def test_start_fields_and_defaults() -> None:
@@ -140,6 +142,9 @@ def test_system_takes_start_fields_and_with_mic_but_no_speech_id() -> None:
     assert parse_system({}).with_mic is False
     assert code_of(parse_system, {"speech_id": "s1"}) == ("bad_request", "speech_id")
     assert code_of(parse_system, {"with_mic": "yes"}) == ("bad_request", "with_mic")
+    assert parse_system({"app": "src_3"}).app == "src_3"
+    assert parse_system({}).app is None
+    assert code_of(parse_system, {"app": 3}) == ("bad_request", "app")
 
 
 def test_diarize_and_num_speakers() -> None:

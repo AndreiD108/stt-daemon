@@ -1,7 +1,9 @@
-"""System audio on Linux: a `pw-record` process capturing what the default output plays.
+"""System audio on Linux: a `pw-record` process capturing what the default output plays, or one
+application's stream.
 
 The process is restarted with backoff when it exits or goes quiet: the monitor of an idle output
-still delivers silence, so no frames at all means the capture is dead.
+still delivers silence, so no frames at all means the capture is dead. An application's stream
+ends with the stream; then the capture waits for that app to play again.
 """
 
 import asyncio
@@ -9,6 +11,7 @@ import contextlib
 import logging
 import time
 from collections.abc import Callable, Sequence
+from typing import Protocol
 
 import numpy as np
 
@@ -23,31 +26,60 @@ READ_BYTES = 6400
 """At most 200 ms of s16 mono at 16 kHz per read."""
 
 
+type Command = Callable[[str | None], Sequence[str]]
+"""The command line for a target serial (None: the default output)."""
+
+
+class AppTarget(Protocol):
+    """The stream a system track follows."""
+
+    @property
+    def serial(self) -> str: ...
+
+    def current(self) -> str | None:
+        """Its serial while it plays, else None."""
+        ...
+
+    async def appeared(self) -> str:
+        """Wait until it plays again; its serial."""
+        ...
+
+
 def pw_record_command(target: str | None = None, sample_rate: int = SAMPLE_RATE) -> list[str]:
     """s16 mono on stdout; without `target`, the default output's monitor (it follows the user's
-    output switches)."""
+    output switches). A `target` serial is never swapped for another node when it goes."""
     command = ["pw-record", "--raw", "--rate", str(sample_rate), "--channels", "1"]
     command += ["--format", "s16", "--latency", "20ms"]
     if target is None:
         command += ["-P", "{ stream.capture.sink = true }"]
     else:
         command += ["--target", target]
+        command += ["-P", "{ node.dont-fallback = true, node.dont-reconnect = true }"]
     return [*command, "-"]
 
 
 class PwRecordCapture(CaptureSource):
-    """One session's system track. `command` writes s16 mono at `sample_rate` to stdout."""
+    """One session's system track. `command` writes s16 mono at `sample_rate` to stdout; a fixed
+    list ignores `target`."""
 
     def __init__(
         self,
-        command: Sequence[str] | None = None,
+        command: Sequence[str] | Command = pw_record_command,
         *,
+        target: AppTarget | None = None,
         sample_rate: int = SAMPLE_RATE,
         stall_s: float = STALL_S,
         backoff_s: Sequence[float] = RESTART_BACKOFF_S,
     ) -> None:
         super().__init__(sample_rate=sample_rate, buffer_ms=1000, keep_open=False)
-        self.command = list(command) if command is not None else pw_record_command()
+        if callable(command):
+            self._command: Command = command
+        else:
+            fixed = list(command)
+            self._command = lambda _serial: fixed
+        self.target = target
+        self.command = list(self._command(None if target is None else target.serial))
+        """The command line of the last start."""
         self.on_lost: Callable[[str], None] | None = None
         """Called once when frames stop, with why."""
         self.on_restored: Callable[[], None] | None = None
@@ -77,7 +109,7 @@ class PwRecordCapture(CaptureSource):
         """Start the process. Raises `ToolMissing` when it can't be started."""
         if self._task is not None:
             return
-        proc = await self._spawn()
+        proc = await self._spawn(None if self.target is None else self.target.serial)
         self._task = asyncio.create_task(self._run(proc))
 
     async def release(self) -> None:
@@ -93,7 +125,8 @@ class PwRecordCapture(CaptureSource):
             async with asyncio.timeout(timeout_s):
                 await self._settled.wait()
 
-    async def _spawn(self) -> asyncio.subprocess.Process:
+    async def _spawn(self, serial: str | None) -> asyncio.subprocess.Process:
+        self.command = list(self._command(serial))
         try:
             return await asyncio.create_subprocess_exec(
                 *self.command,
@@ -112,10 +145,16 @@ class PwRecordCapture(CaptureSource):
                 if produced:
                     failures = 0
                 self._lose(reason)
-            await asyncio.sleep(self._backoff_s[min(failures, len(self._backoff_s) - 1)])
-            failures += 1
+            serial = None if self.target is None else self.target.current()
+            if self.target is not None and serial is None:
+                serial = await self.target.appeared()
+                log.info("system capture: the app plays again, on stream %s", serial)
+                failures = 0
+            else:
+                await asyncio.sleep(self._backoff_s[min(failures, len(self._backoff_s) - 1)])
+                failures += 1
             try:
-                proc = await self._spawn()
+                proc = await self._spawn(serial)
             except (ToolMissing, OSError) as exc:
                 log.warning("system capture: %s could not be started: %s", self.command[0], exc)
                 proc = None

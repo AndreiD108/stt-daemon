@@ -118,7 +118,7 @@ async def test_a_system_session_decodes_both_tracks_on_one_model(daemon: Harness
     await daemon.start(
         capture=mic,
         backends={"parakeet": backend},
-        system_capture=lambda: PwRecordCapture(
+        system_capture=lambda _: PwRecordCapture(
             [sys.executable, str(FAKE_PW_RECORD), "--wav", str(FIXTURE)]
         ),
     )

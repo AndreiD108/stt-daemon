@@ -8,7 +8,7 @@ from dataclasses import replace
 import pytest
 from harness import FIXTURE, Harness, Msg, TestClient
 
-from stt_daemon.audio.pw_capture import PwRecordCapture
+from stt_daemon.audio.pw_capture import AppTarget, PwRecordCapture
 from stt_daemon.audio.wav_capture import WavCapture
 from stt_daemon.backends.base import CommitPolicy
 from stt_daemon.backends.fake import FAKE_CAPABILITIES, FakeBackend, FakeReply
@@ -29,7 +29,7 @@ class Captures:
     def __init__(self) -> None:
         self.made: list[PwRecordCapture] = []
 
-    def __call__(self) -> PwRecordCapture:
+    def __call__(self, target: AppTarget | None) -> PwRecordCapture:
         capture = PwRecordCapture([sys.executable, FAKE_PW_RECORD, "--wav", str(FIXTURE)])
         self.made.append(capture)
         return capture
@@ -145,7 +145,7 @@ async def test_a_fatal_error_on_one_track_ends_the_session_with_both_tracks_text
 
 
 async def test_a_missing_tool_is_refused_with_its_name(daemon: Harness) -> None:
-    await daemon.start(system_capture=lambda: PwRecordCapture(["/nonexistent/pw-record"]))
+    await daemon.start(system_capture=lambda _: PwRecordCapture(["/nonexistent/pw-record"]))
     scribbly, _ = await daemon.connect("Scribbly")
     refused = await scribbly.request("start_system_session")
     assert refused["data"]["code"] == "tool_unavailable"

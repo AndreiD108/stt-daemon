@@ -16,7 +16,7 @@ from pathlib import Path
 
 from .. import __version__
 from ..audio.capture import CaptureSource
-from ..audio.pw_capture import PwRecordCapture
+from ..audio.pw_capture import AppTarget, PwRecordCapture
 from ..audio.vad import VadEvent
 from ..config import ConfigError
 from ..credentials import CredentialsError
@@ -38,8 +38,9 @@ from .messages import (
 from .peer import peer_of
 from .slot import Slot
 from .slot_state import Client, SlotState
+from .sources import SourceEvent, SourceScan
 from .speech import SpeechWatch
-from .starts import Running, Starts
+from .starts import Running, Starts, system_capture
 
 log = logging.getLogger(__name__)
 
@@ -59,16 +60,19 @@ class Server(Starts):
         capture: CaptureSource,
         setup: Setup,
         reload_setup: Callable[[], Setup],
-        system_capture: Callable[[], PwRecordCapture] = PwRecordCapture,
+        system_capture: Callable[[AppTarget | None], PwRecordCapture] = system_capture,
+        sources: SourceScan | None = None,
     ) -> None:
         """`reload_setup` re-reads config and credentials; it raises `ConfigError` or
-        `CredentialsError`. `system_capture` makes a `system` session's system track. Construct
-        on the loop."""
+        `CredentialsError`. `system_capture` makes a `system` session's system track, following
+        an app's stream or not. Construct on the loop."""
         self.path = path
         self.capture = capture
         self.setup = setup
         self._reload_setup = reload_setup
         self._system_capture = system_capture
+        self._sources = sources or SourceScan()
+        self._sources.on_event = self._source_event
         self._connections: set[Connection] = set()
         self._welcomed: dict[str, Connection] = {}
         self._handlers: set[asyncio.Task[None]] = set()
@@ -103,6 +107,7 @@ class Server(Starts):
             os.umask(umask)
         os.chmod(self.path, 0o600)
         self._speech.start()
+        self._sources.start()
         log.info("listening on %s", self.path)
 
     async def close(self) -> None:
@@ -111,6 +116,7 @@ class Server(Starts):
         if self._server is not None:
             self._server.close()
         await self._speech.close()
+        await self._sources.close()
         workers = [c.worker for c in self._connections if c.worker is not None]
         for worker in workers:
             worker.cancel()
@@ -173,6 +179,7 @@ class Server(Starts):
         cid = conn.client.client_id
         conn.client = replace(conn.client, label=hello.label)
         conn.observe_all, conn.vad_events = hello.observe_all, hello.vad_events
+        conn.sources = hello.sources
         self._welcomed[cid] = conn
         peer = conn.client.peer
         log.info("client %s connected: label %s, pid %s", cid, hello.label, peer.pid)
@@ -185,6 +192,7 @@ class Server(Starts):
                 **self.setup.to_wire(),
                 "mic_open": self.capture.keep_open,
                 "slot": self._slot.state.to_wire(),
+                "sources": [source.to_wire() for source in self._sources.sources()],
             },
             message.id,
         )
@@ -328,6 +336,8 @@ class Server(Starts):
         reply_to = None
         if isinstance(event, SessionStarted):
             reply_to = run.start_id
+            if run.app is not None:
+                data |= {"app": run.app.id, "app_name": run.app.name}
             log.info("session %s started for %s on %s", session_id, client.client_id, event.backend)
         elif isinstance(event, SessionEnded):
             reply_to = run.end_id
@@ -356,6 +366,12 @@ class Server(Starts):
                 is_holder = conn.client.client_id == holder.client_id
                 wanted = conn.observe_all or (is_holder and conn.vad_events)
             if wanted:
+                conn.send(kind, data)
+
+    def _source_event(self, event: SourceEvent) -> None:
+        kind, data = wire.source_event(event)
+        for conn in self._welcomed.values():
+            if conn.sources:
                 conn.send(kind, data)
 
     def _remember(self, client: Client, run: Running, ended: SessionEnded) -> None:
