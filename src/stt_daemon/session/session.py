@@ -6,6 +6,9 @@ backend's connections ending.
 
 A `transcribe` session reads a `ByteStreamCapture` on audio time: it commits at pauses and at a
 chunk cap instead of on a wall-clock cadence, and its `stop` means the end of input.
+
+A non-`mic` session can be suspended for a dictation: its link drops its connection and keeps
+the audio; on resume a new connection gets all of it.
 """
 
 import asyncio
@@ -13,7 +16,7 @@ import logging
 import time
 import uuid
 from collections.abc import Callable, Coroutine
-from dataclasses import dataclass
+from dataclasses import replace
 from typing import Any, Literal
 
 import numpy as np
@@ -22,23 +25,27 @@ from ..audio.capture import CaptureSource
 from ..audio.frames import Attachment, Frame, epoch_ms
 from ..audio.stream_capture import ByteStreamCapture, DecodeFailed
 from ..audio.vad import WINDOW, SpeechEnded, StreamingVAD
-from ..backends.base import Backend, CommitPolicy, Committed, OpenOptions
+from ..backends.base import Backend, CommitPolicy, Committed, OpenFailed
 from ..config import Config
 from .events import (
     EndReason,
     PartialText,
+    PreemptedBy,
     Progress,
     SessionEnded,
     SessionError,
     SessionEvent,
     SessionKind,
+    SessionResumed,
     SessionStarted,
+    SessionSuspended,
 )
-from .markers import MarkerQueue, TimedWord, place
+from .moving import while_moving
+from .options import MarkerRefused, SessionOptions
 from .pause_gate import Outgoing, PauseGate
 from .recovery import Link
+from .segments import Segments
 from .timeline import Timeline
-from .transcript import Transcript
 
 log = logging.getLogger(__name__)
 
@@ -52,27 +59,6 @@ MIN_BACKLOG_S = 60.0
 (or twice its chunk cap, if more)."""
 STALL_S = 60.0
 """A `transcribe` session at that limit fails when its backend answers nothing for this long."""
-
-
-class MarkerRefused(Exception):
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(message)
-        self.code = code
-        self.message = message
-
-
-@dataclass(frozen=True)
-class SessionOptions:
-    open: OpenOptions
-    """`language` already resolved: segments carry the detected language only for "auto"."""
-    word_timestamps: bool = False
-
-
-def start_point(requested_at: float, pre_start_ms: int, previous_end: float | None) -> float:
-    """Where a session started by command takes its audio from: `pre_start_ms` before the
-    command, but not before the previous session's audio ended (the ring still holds it)."""
-    since = requested_at - pre_start_ms / 1000
-    return since if previous_end is None else max(since, previous_end)
 
 
 class Session:
@@ -94,6 +80,8 @@ class Session:
         self._config = config
         self._capture = capture
         self._backend = backend
+        if kind == "mic":
+            options = replace(options, open=replace(options.open, dictation=True))
         self._options = options
         self._emit = emit
         self._state: State = "new"
@@ -108,12 +96,19 @@ class Session:
         self._gate = PauseGate(
             hold_s=self._vad.start_delay_s + pad_s + 2 * WINDOW / rate, pad_s=pad_s
         )
-        self._markers = MarkerQueue()
-        self._transcript = Transcript()
+        self._segments = Segments(
+            auto_language=options.open.language == "auto",
+            word_timestamps=options.word_timestamps,
+        )
+        self._markers = self._segments.markers
         self._timeline = Timeline(0.0, rate)
         self._link: Link | None = None
         self._attachment: Attachment | None = None
-        self._boundary_s: dict[int, float] = {}
+        self.make_room: Callable[[], Coroutine[Any, Any, bool]] | None = None
+        """Suspends another session on the backend when the provider refuses one more
+        connection (`concurrency_limit`); True when it did, and the open is tried once more."""
+        self._suspended_at: float | None = None
+        self._was_suspended = False
         self._speech_since_commit = False
         self._samples_since_commit = 0
         self._last_commit_at = 0.0
@@ -165,6 +160,7 @@ class Session:
         self._attachment = attachment
         origin = attachment.started_at
         self._timeline = Timeline(origin, self._capture.sample_rate)
+        self._segments.timeline = self._timeline
         self.audio_end = origin
         self._link = Link(
             backend=self._backend,
@@ -177,7 +173,14 @@ class Session:
             on_fatal=self._on_fatal,
         )
         try:
-            await self._link.open()
+            try:
+                await self._link.open()
+            except OpenFailed as exc:
+                if exc.code != "concurrency_limit" or self.make_room is None:
+                    raise
+                if not await self.make_room():
+                    raise
+                await self._link.open()
         except BaseException:
             attachment.detach()
             await self._capture.release()
@@ -255,6 +258,51 @@ class Session:
         if self._state == "new":
             raise RuntimeError("the session hasn't started")
         return await asyncio.shield(self._ended)
+
+    @property
+    def suspendable(self) -> bool:
+        link = self._link
+        return (
+            self.kind != "mic"
+            and self._state in ("running", "stopping")
+            and not self._finishing
+            and link is not None
+            and link.alive
+            and not link.suspended
+        )
+
+    @property
+    def suspended(self) -> bool:
+        return self._link is not None and self._link.suspended
+
+    async def suspend(self, by: PreemptedBy) -> bool:
+        """Drop the backend connection and keep the audio until `resume`. False when the
+        session is past suspending (ending, or its link failed)."""
+        if not self.suspendable:
+            return False
+        assert self._link is not None
+        await self._link.suspend()
+        if not self._link.suspended or self._finishing:
+            return False
+        self._suspended_at = time.monotonic()
+        self._was_suspended = True
+        self._emit(SessionSuspended(by))
+        return True
+
+    async def resume(self) -> bool:
+        """Reconnect; the new connection gets the audio kept meanwhile. False when the session
+        ended or failed first."""
+        link = self._link
+        if link is None or not link.suspended or not await link.resume():
+            return False
+        if self._state in ("running", "stopping") and self._suspended_at is not None:
+            self._emit(SessionResumed(round(time.monotonic() - self._suspended_at, 3)))
+        return True
+
+    def give_up(self, code: str, message: str) -> None:
+        """End with a fatal error found outside the session (its backend is gone)."""
+        if self._link is not None:
+            self._link.fail(code, message)
 
     async def _audio_loop(self) -> None:
         assert self._attachment is not None
@@ -345,33 +393,8 @@ class Session:
     def _on_committed(self, event: Committed, final: bool) -> None:
         if self._state not in ("running", "stopping"):
             return  # cancelled or failed: uncommitted text is dropped
-        tl, conn = self._timeline, event.connection_id
-        boundary = self._boundary_s.get(conn, 0.0)
-        end_s = max(event.audio_end_s, boundary)
-        self._boundary_s[conn] = end_s
-        start_ms = tl.to_ms(tl.to_capture(conn, boundary, "start"))
-        end_ms = max(tl.to_ms(tl.to_capture(conn, end_s, "end")), start_ms)
-        words: tuple[TimedWord, ...] | None = None
-        if event.words is not None:
-            words = tuple(self._timed(conn, w.text, w.start_s, w.end_s) for w in event.words)
-        markers = self._markers.take(None if final else end_ms)
-        text, placed = place(event.text, words, (start_ms, end_ms), markers)
-        segment = self._transcript.add(
-            text,
-            plain=event.text,
-            language=event.language if self._options.open.language == "auto" else None,
-            span=(start_ms, end_ms),
-            words=words if self._options.word_timestamps else None,
-            markers=tuple(placed),
-        )
-        if segment is not None:
+        if (segment := self._segments.committed(event, final)) is not None:
             self._emit(segment)
-
-    def _timed(self, conn: int, text: str, start_s: float, end_s: float) -> TimedWord:
-        tl = self._timeline
-        start = tl.to_ms(tl.to_capture(conn, start_s, "start"))
-        end = tl.to_ms(tl.to_capture(conn, end_s, "end"))
-        return TimedWord(text, start, max(end, start))
 
     def _fail(self, code: str, message: str) -> None:
         if self._state != "running":
@@ -385,7 +408,9 @@ class Session:
         wait_s = self._config.session.stop_wait_ms / 1000
         try:
             if self._stream is not None:
-                await self._while_moving(self._drain_input(), wait_s)
+                await while_moving(self._drain_input(), wait_s, self._link_mark)
+            elif self._was_suspended:
+                await while_moving(self._send_rest(), wait_s, self._link_mark)
             else:
                 async with asyncio.timeout(wait_s):
                     await self._send_rest()
@@ -407,6 +432,14 @@ class Session:
         else:
             await self._finish(reason)
 
+    def _link_mark(self) -> tuple[object, ...] | None:
+        """Changes as audio is taken, sent or answered; None while suspended."""
+        link = self._link
+        assert link is not None
+        if link.suspended:
+            return None
+        return (self.audio_end, link.backlog_s, link.sent_samples)
+
     async def _drain_input(self) -> None:
         assert self._stream is not None
         await self._stream.finish()
@@ -421,23 +454,6 @@ class Session:
         self._commit(final=True)
         assert self._link is not None
         await self._link.settle()
-
-    async def _while_moving(self, work: Coroutine[Any, Any, None], quiet_s: float) -> None:
-        """Run `work`; TimeoutError once neither audio is taken nor a commit answered for
-        `quiet_s`. On audio time the rest can be minutes of audio, so no fixed bound fits."""
-        assert self._link is not None
-        task = asyncio.ensure_future(work)
-        seen = (self.audio_end, self._link.backlog_s)
-        try:
-            while not (await asyncio.wait([task], timeout=quiet_s))[0]:
-                now = (self.audio_end, self._link.backlog_s)
-                if now == seen:
-                    raise TimeoutError
-                seen = now
-        finally:
-            task.cancel()
-            await asyncio.wait([task])
-        task.result()
 
     async def _end(self, reason: EndReason, error: SessionError | None = None) -> None:
         await self._stop_intake(drain=False)
@@ -471,28 +487,18 @@ class Session:
         self._finishing = True
         if self._link is not None:
             await self._link.close()
-        if self._markers:
-            at = self._timeline.to_ms(self.audio_end)
-            text, placed = place("", (), (at, at), self._markers.take())
-            segment = self._transcript.add(
-                text,
-                plain="",
-                language=None,
-                span=(at, at),
-                words=() if self._options.word_timestamps else None,
-                markers=tuple(placed),
-            )
-            if segment is not None:
-                self._emit(segment)
+        if (segment := self._segments.leftover(self.audio_end)) is not None:
+            self._emit(segment)
         if error is not None:
             self._emit(error)
         await self._capture.release()
+        transcript = self._segments.transcript
         ended = SessionEnded(
             reason,
-            self._transcript.final_text,
+            transcript.final_text,
             self._timeline.to_ms(self.audio_end),
-            len(self._transcript.segments),
-            plain_text=self._transcript.plain_text,
+            len(transcript.segments),
+            plain_text=transcript.plain_text,
         )
         self._state = "ended"
         self._ended.set_result(ended)

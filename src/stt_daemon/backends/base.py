@@ -96,6 +96,8 @@ class Capabilities:
     """Of "keyterms", "previous_text"."""
     max_connection_s: float | None
     commit_policy: CommitPolicy
+    paced_replay: bool = True
+    """Audio replayed onto a new connection goes at a bounded rate; off for local backends."""
 
 
 @dataclass(frozen=True)
@@ -106,6 +108,8 @@ class OpenOptions:
     """The client's; the backend adds its config defaults first."""
     previous_text: str | None = None
     partials: bool = False
+    dictation: bool = False
+    """A mic session: on a shared local model its decodes go before other sessions'."""
 
 
 class BackendUnavailable(Exception):

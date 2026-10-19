@@ -29,6 +29,8 @@ minutes, in any language. Say hello, start a session, read what comes back:
 - **Markers.** Drop a marker at a moment and get it back between the words said then.
 - **Context.** The previous text per window or document, so a dictation picks up
   where it left off.
+- **Dictation first.** A dictation never waits for a file transcription on a full
+  backend: the file pauses, loses nothing, and goes on after.
 
 ![A client starts a session with key terms and gets VAD events, partials, and a segment with word times](docs/media/client.gif)
 

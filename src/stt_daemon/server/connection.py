@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import select
 import socket
 import stat
 from collections.abc import Mapping
@@ -9,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .messages import MessageId, encode
-from .slot import Client
+from .slot_state import Client
 
 log = logging.getLogger(__name__)
 
@@ -17,6 +18,7 @@ LINE_LIMIT = 2 << 20
 """Fits an `audio` command with a full chunk in base64."""
 WRITE_BUFFER_LIMIT = 8 << 20
 """A client that lets this much pile up unread is closed."""
+HANGUP_CHECK_S = 0.5
 
 
 class SocketInUse(Exception):
@@ -43,6 +45,30 @@ class Connection:
             log.warning("client %s reads too slowly; closing it", self.client.client_id)
             self.closed = True
             transport.abort()
+
+    def hung_up(self) -> bool:
+        sock = self.writer.get_extra_info("socket")
+        if sock is None or sock.fileno() < 0:
+            return True
+        poller = select.poll()
+        poller.register(sock.fileno(), select.POLLHUP)
+        return bool(poller.poll(0))
+
+
+async def put_until_gone[T](conn: Connection, queue: asyncio.Queue[T], item: T) -> None:
+    """Waits for room in `queue`; raises ConnectionError when the client hangs up meanwhile,
+    since the reader, waiting here, would not see the end of input."""
+    if not queue.full():
+        queue.put_nowait(item)
+        return
+    put = asyncio.ensure_future(queue.put(item))
+    try:
+        while not put.done():
+            await asyncio.wait([put], timeout=HANGUP_CHECK_S)
+            if not put.done() and conn.hung_up():
+                raise ConnectionError("the client hung up")
+    finally:
+        put.cancel()
 
 
 async def readline(conn: Connection, reader: asyncio.StreamReader) -> bytes:

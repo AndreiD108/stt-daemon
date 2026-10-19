@@ -10,7 +10,8 @@ from stt_daemon.backends.base import Committed, OpenFailed, OpenOptions
 from stt_daemon.backends.fake import FakeBackend, FakeReply
 from stt_daemon.config import Config
 from stt_daemon.session.events import SessionEnded, SessionError, SessionEvent
-from stt_daemon.session.session import MarkerRefused, Session, SessionOptions, start_point
+from stt_daemon.session.options import MarkerRefused, SessionOptions, start_point
+from stt_daemon.session.session import Session
 from stt_daemon.session.transcript import Segment
 
 

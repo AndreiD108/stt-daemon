@@ -130,6 +130,25 @@ async def test_refused_key_fails_at_once_without_retrying(fake_el: FakeElevenLab
     assert len(fake_el.requests) == 1
 
 
+@pytest.mark.parametrize(
+    ("body", "code"),
+    [
+        ('{"detail": {"type": "rate_limit_error", "code": "concurrent_limit_exceeded"}}', None),
+        ('{"detail": {"status": "too_many_concurrent_requests"}}', None),
+        ('{"detail": {"type": "rate_limit_error", "code": "rate_limit_exceeded"}}', "rate_limited"),
+    ],
+)
+async def test_a_429_naming_concurrency_is_its_own_code(
+    fake_el: FakeElevenLabs, body: str, code: str | None
+) -> None:
+    fake_el.status, fake_el.status_body = 429, body
+    backend = ElevenLabsBackend(ElevenLabsConfig(endpoint=fake_el.url), TEST_KEY)
+    with pytest.raises(OpenFailed) as failed:
+        await _open(backend)
+    assert failed.value.code == (code or "concurrency_limit")
+    assert len(fake_el.requests) == 1
+
+
 @pytest.mark.usefixtures("quick_attempts")
 async def test_server_errors_on_the_handshake_are_retried(fake_el: FakeElevenLabs) -> None:
     fake_el.status = 503

@@ -8,10 +8,12 @@ from ..session.events import (
     SessionEnded,
     SessionError,
     SessionEvent,
+    SessionResumed,
     SessionStarted,
+    SessionSuspended,
 )
 from ..session.transcript import Segment
-from .slot import Client
+from .slot_state import Client
 
 type Wire = tuple[str, dict[str, object]]
 
@@ -44,6 +46,18 @@ def session_event(
                 "code": event.code,
                 "message": event.message,
                 "fatal": event.fatal,
+            }
+        case SessionSuspended():
+            by = event.by
+            return "session_suspended", {
+                "session_id": session_id,
+                "reason": "preempted",
+                "by": {"kind": by.kind, "pid": by.pid, "client_label": by.client_label},
+            }
+        case SessionResumed():
+            return "session_resumed", {
+                "session_id": session_id,
+                "suspended_seconds": event.suspended_seconds,
             }
         case SessionEnded():
             data: dict[str, object] = {

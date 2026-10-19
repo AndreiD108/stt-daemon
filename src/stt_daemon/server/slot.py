@@ -2,7 +2,9 @@
 slot changes.
 
 A `mic` session takes the mic slot and one slot on its backend; a `transcribe` session takes
-only the backend slot and is never evictable. The slot sees every event of the
+only the backend slot and is never evictable. A dictation (`mic`) that finds its backend full
+suspends the lowest-ranked other kind there; suspended sessions resume, longest suspended first,
+as slots free up. The slot sees every event of the
 sessions it starts (it wraps their `emit`), so `slot` changes go out in protocol order: the new
 holder's `slot` just before its `session_started`, and `idle` just after the last `session_ended`.
 """
@@ -10,93 +12,25 @@ holder's `slot` just before its `session_started`, and `idle` just after the las
 import asyncio
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass, field, replace
-from typing import Literal
+from dataclasses import dataclass, replace
 
 from ..audio.capture import CaptureSource
 from ..audio.frames import Attachment, epoch_ms
 from ..audio.vad import SpeechStarted, VadEvent
-from ..session.events import EvictedBy, SessionEnded, SessionEvent, SessionStarted
-from ..session.session import Session, start_point
-from .backend_slots import BackendSession, BackendSlots, BackendUsage, usage_to_wire
-from .peer import Peer
+from ..session.events import (
+    KIND_RANK,
+    EvictedBy,
+    PreemptedBy,
+    SessionEnded,
+    SessionEvent,
+    SessionStarted,
+)
+from ..session.options import start_point
+from ..session.session import Session
+from .backend_slots import BackendSession, BackendSlots
+from .slot_state import Client, Holder, SlotState, StartRefused, StateName
 
-type StateName = Literal["idle", "busy", "evictable"]
 type Emit = Callable[[SessionEvent], None]
-
-
-@dataclass(frozen=True)
-class Client:
-    client_id: str
-    label: str | None = None
-    peer: Peer = field(default_factory=Peer)
-
-
-@dataclass(frozen=True)
-class Holder:
-    client_id: str
-    pid: int | None
-    cmdline: tuple[str, ...] | None
-    client_label: str | None
-    session_label: str | None
-    session_id: str
-    since: int | None
-    """Epoch ms of the session's first sample; None while the session is still starting."""
-    last_speech_at: int | None
-
-
-@dataclass(frozen=True)
-class SlotState:
-    """The mic slot's `state` and `holder`, and every backend's slots."""
-
-    state: StateName
-    holder: Holder | None = None
-    backends: tuple[BackendUsage, ...] = ()
-
-    def to_wire(self) -> dict[str, object]:
-        data: dict[str, object] = {"state": self.state}
-        if self.holder is not None:
-            holder = asdict(self.holder)
-            if self.holder.cmdline is not None:
-                holder["cmdline"] = list(self.holder.cmdline)
-            data["holder"] = holder
-        data["backends"] = usage_to_wire(self.backends)
-        return data
-
-
-class StartRefused(Exception):
-    """`busy` or `session_active`; `slot` is the slot at the time. A `busy` names the slot that
-    is full (`full_slot`), its backend for a backend slot, and the session in the way."""
-
-    def __init__(
-        self,
-        code: Literal["busy", "session_active"],
-        message: str,
-        slot: SlotState,
-        *,
-        full_slot: Literal["mic", "backend"] | None = None,
-        backend: str | None = None,
-        blocker: BackendSession | None = None,
-    ):
-        super().__init__(message)
-        self.code = code
-        self.message = message
-        self.slot = slot
-        self.full_slot = full_slot
-        self.backend = backend
-        self.blocker = blocker
-
-    def to_wire(self) -> dict[str, object]:
-        """The `error` data next to `code` and `message`."""
-        data: dict[str, object] = {"slot": self.slot.to_wire()}
-        if self.full_slot is not None:
-            data["full_slot"] = self.full_slot
-        if self.backend is not None:
-            data["backend"] = self.backend
-        if self.blocker is not None:
-            b = self.blocker
-            data["holder"] = {"pid": b.pid, "client_label": b.client_label, "kind": b.kind}
-        return data
 
 
 class ClientGone(Exception):
@@ -119,6 +53,9 @@ class _Claim:
     """Its slot on the session's backend."""
     mic: bool = True
     """Holds (or is taking) the mic slot."""
+    lent_to: "_Claim | None" = None
+    """Suspended because the provider refused that session a connection: resumes after it."""
+    released: bool = False
 
 
 class Slot:
@@ -144,6 +81,8 @@ class Slot:
         self._previous_end: float | None = None
         self._inputs: dict[str, _Claim] = {}
         """Sessions on a backend slot only (`transcribe`), by client id."""
+        self._resuming: set[asyncio.Task[bool]] = set()
+        self._closing = False
         self.backends = BackendSlots(capacities)
         self._announced = _change_key(SlotState("idle", backends=self.backends.usage()))
         self._speaking = False
@@ -160,6 +99,7 @@ class Slot:
 
     def capacities_changed(self) -> None:
         """After a reload: backends or their `max_sessions` may differ."""
+        self._resume_waiting()
         self._announce()
 
     def heard(self, event: VadEvent) -> None:
@@ -211,18 +151,19 @@ class Slot:
                 blocker=blocking.place,
             )
         claim = _Claim(client, session_label)
-        claim.session = make_session(self._forward(claim))
-        self._take_backend(claim, leaving=holder.place if holder else None)
+        claim.session = session = make_session(self._forward(claim))
+        session.make_room = lambda: self._make_room(claim)
+        victim = self._take_backend(claim, leaving=holder.place if holder else None)
         if since is None:
             since = start_point(requested_at, self._pre_start_ms, self._previous_end)
         if holder is None:
             self._holder = claim
             try:
-                return await self._open(claim, since=since)
+                return await self._open(claim, since=since, victim=victim)
             except BaseException:
                 self._drop(claim)
                 raise
-        return await self._take_over(holder, claim, since)
+        return await self._take_over(holder, claim, since, victim)
 
     async def start_input(
         self,
@@ -245,12 +186,20 @@ class Slot:
             self._drop(claim)
             raise
 
-    def _take_backend(self, claim: _Claim, *, leaving: BackendSession | None) -> None:
+    def _take_backend(self, claim: _Claim, *, leaving: BackendSession | None) -> _Claim | None:
+        """Take a slot on the session's backend; a dictation may set another session aside for
+        it, which is returned, to be suspended before the dictation starts."""
         session = claim.session
         assert session is not None
         backend = session.backend_name
         blocker = self.backends.full(backend, leaving=leaving)
-        if blocker is not None:
+        victim = None
+        if blocker is not None and session.kind == "mic":
+            victim = self._victim(backend)
+        if victim is not None:
+            assert victim.place is not None
+            self.backends.suspend(victim.place)
+        elif blocker is not None:
             raise StartRefused(
                 "busy",
                 f"{backend} already runs as many sessions as its max_sessions allows",
@@ -269,6 +218,73 @@ class Slot:
             client.label,
         )
         self.backends.take(claim.place)
+        return victim
+
+    def _victim(self, backend: str) -> _Claim | None:
+        """The suspendable session a dictation on `backend` sets aside: the lowest ranked kind,
+        then the most recently started."""
+        holders = {id(place) for place in self.backends.holders(backend)}
+        candidates = [
+            c
+            for c in self._inputs.values()
+            if id(c.place) in holders
+            and c.started_at is not None
+            and c.session is not None
+            and c.session.suspendable
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda c: (_rank(c), c.started_mono))
+
+    async def _suspend(self, victim: _Claim, by: _Claim) -> None:
+        """Its slot is already given up."""
+        assert victim.session is not None
+        client = by.client
+        preempted_by = PreemptedBy("mic", client.peer.pid, client.label)
+        # Shielded: a cancelled start still leaves the victim fully suspended, then resumed.
+        if not await asyncio.shield(victim.session.suspend(preempted_by)):
+            return  # it is ending; its session_ended frees its place
+        self._announce()
+
+    async def _make_room(self, claim: _Claim) -> bool:
+        """The provider refused one more connection: suspend a session on the backend, if any,
+        though the daemon's own count had room."""
+        assert claim.session is not None
+        victim = self._victim(claim.session.backend_name)
+        if victim is None:
+            return False
+        assert victim.place is not None
+        self.backends.suspend(victim.place)
+        victim.lent_to = claim
+        await self._suspend(victim, claim)
+        return True
+
+    def _resume_waiting(self) -> None:
+        """Give free slots to suspended sessions, longest suspended first; fail those whose
+        backend is no longer set up."""
+        if self._closing:
+            return
+        for place in self.backends.waiting():
+            claim = self._inputs.get(place.client_id)
+            if claim is None or claim.place is not place or claim.session is None:
+                continue
+            if not self.backends.set_up(place.backend):
+                claim.session.give_up(
+                    "config", f"{place.backend} is no longer set up, so the session can't resume"
+                )
+            elif (claim.lent_to is None or claim.lent_to.released) and self.backends.full(
+                place.backend
+            ) is None:
+                claim.lent_to = None
+                self.backends.resume(place)
+                task = asyncio.create_task(claim.session.resume())
+                self._resuming.add(task)
+                task.add_done_callback(self._resume_done)
+
+    def _resume_done(self, task: asyncio.Task[bool]) -> None:
+        self._resuming.discard(task)
+        if not task.cancelled() and task.exception() is None and task.result():
+            self._announce()
 
     async def client_gone(self, client_id: str) -> None:
         """The client disconnected: its running session is cancelled (`client_gone`)."""
@@ -288,6 +304,9 @@ class Slot:
     async def shutdown(self) -> None:
         """Daemon exit, after pending starts are cancelled: the mic session stops as
         `stop_session` would; sessions on a backend slot only are cancelled (input unfinished)."""
+        self._closing = True
+        for task in self._resuming:
+            task.cancel()
         inputs = [c.session for c in self._inputs.values() if c.session is not None]
         await asyncio.gather(*(s.cancel() for s in inputs if s.state != "new"))
         claim = self._holder
@@ -299,13 +318,24 @@ class Slot:
             await claim.session.wait_ended()
 
     async def _open(
-        self, claim: _Claim, *, since: float | None = None, attachment: Attachment | None = None
+        self,
+        claim: _Claim,
+        *,
+        since: float | None = None,
+        attachment: Attachment | None = None,
+        victim: _Claim | None = None,
     ) -> SessionStarted:
-        """`Session.start` in a task `client_gone` can cancel, so a gone client's start ends now."""
-        assert claim.session is not None
-        claim.opening = asyncio.ensure_future(
-            claim.session.start(since=since, attachment=attachment)
-        )
+        """`Session.start` in a task `client_gone` can cancel, so a gone client's start ends now.
+        A `victim` is suspended first."""
+        session = claim.session
+        assert session is not None
+
+        async def start() -> SessionStarted:
+            if victim is not None:
+                await self._suspend(victim, claim)
+            return await session.start(since=since, attachment=attachment)
+
+        claim.opening = asyncio.ensure_future(start())
         try:
             return await claim.opening
         except asyncio.CancelledError:
@@ -316,7 +346,9 @@ class Slot:
         finally:
             claim.opening = None
 
-    async def _take_over(self, holder: _Claim, claim: _Claim, since: float) -> SessionStarted:
+    async def _take_over(
+        self, holder: _Claim, claim: _Claim, since: float, victim: _Claim | None
+    ) -> SessionStarted:
         assert holder.session is not None
         assert claim.session is not None
         self._incoming = claim
@@ -341,7 +373,7 @@ class Slot:
                 raise ClientGone("the client disconnected before its session started")
             self._incoming, self._holder = None, claim
             handed = True
-            return await self._open(claim, attachment=attachment)
+            return await self._open(claim, attachment=attachment, victim=victim)
         except BaseException:
             if not handed:
                 await self._drop_attachment(attachment)
@@ -394,8 +426,10 @@ class Slot:
         self._announce()
 
     def _release(self, claim: _Claim) -> None:
+        claim.released = True
         if claim.place is not None:
             self.backends.release(claim.place)
+            self._resume_waiting()
 
     def _announce(self) -> None:
         holder = self._holder
@@ -451,10 +485,21 @@ class Slot:
         )
 
 
+def _rank(claim: _Claim) -> int:
+    assert claim.session is not None
+    return KIND_RANK[claim.session.kind]
+
+
 def _change_key(state: SlotState) -> object:
     """What a `slot` event is sent for: not `last_speech_at`, which moves on its own."""
     held = state.holder
     backends = tuple(
-        (u.name, u.max_sessions, tuple(s.session_id for s in u.sessions)) for u in state.backends
+        (
+            u.name,
+            u.max_sessions,
+            tuple(s.session_id for s in u.sessions),
+            tuple(s.session_id for s in u.suspended),
+        )
+        for u in state.backends
     )
     return (state.state, held and held.client_id, held and held.session_id, backends)

@@ -84,6 +84,10 @@ class FakeBackend(Backend):
         """Each `send_audio` waits this long before taking the audio."""
         self.answer_on_close = answer_on_close
         """`close()` first answers waiting commits, delays skipped, as a closing server may."""
+        self.close_gate: asyncio.Event | None = None
+        """`close()` waits for it before the connection ends."""
+        self.live_limit: int | None = None
+        """`open` refuses with `concurrency_limit` while this many connections are live."""
         self.open_calls = 0
         self.connections: list[FakeConnection] = []
         self._partial_index = 0
@@ -104,6 +108,10 @@ class FakeBackend(Backend):
             await asyncio.sleep(self.open_delay_s)
         if self.open_failures:
             raise self.open_failures.popleft()
+        if self.live_limit is not None and self.live_limit <= sum(
+            not c.ended for c in self.connections
+        ):
+            raise OpenFailed("concurrency_limit", "no more connections", retryable=False)
         conn = FakeConnection(self, options, connection_id, sink)
         self.connections.append(conn)
         return conn
@@ -194,6 +202,8 @@ class FakeConnection(Connection):
         return commit_id
 
     async def close(self) -> None:
+        if self._backend.close_gate is not None:
+            await self._backend.close_gate.wait()
         if self._backend.answer_on_close and not self.ended:
             while self._pending:
                 pending = self._pending.popleft()

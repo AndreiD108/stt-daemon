@@ -57,6 +57,7 @@ CAPABILITIES = Capabilities(
     hints=frozenset({"keyterms"}),
     max_connection_s=None,
     commit_policy=CommitPolicy(at_pauses=True, max_chunk_s=30.0),
+    paced_replay=False,
 )
 
 
@@ -111,17 +112,51 @@ def _decode(recognizer: Any, audio: Samples, hotwords: str | None) -> Decoded:
     )
 
 
+class Turns:
+    """One holder at a time; waiters marked `first` get the next turn before the others."""
+
+    def __init__(self) -> None:
+        self._busy = False
+        self._first: collections.deque[asyncio.Future[None]] = collections.deque()
+        self._rest: collections.deque[asyncio.Future[None]] = collections.deque()
+
+    async def acquire(self, *, first: bool) -> None:
+        if not self._busy:
+            self._busy = True
+            return
+        turn: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        line = self._first if first else self._rest
+        line.append(turn)
+        try:
+            await turn
+        except asyncio.CancelledError:
+            if turn.done() and not turn.cancelled():
+                self.release()  # given the turn as the caller was cancelled: pass it on
+            elif turn in line:
+                line.remove(turn)
+            raise
+
+    def release(self) -> None:
+        for line in (self._first, self._rest):
+            while line:
+                turn = line.popleft()
+                if not turn.done():
+                    turn.set_result(None)
+                    return
+        self._busy = False
+
+
 class Engine:
     """The daemon's one Parakeet recognizer (~700 MB), shared by every connection on it.
 
-    `acquire` loads it in a thread unless it is loaded; decodes take turns; once no connection
-    uses it, it is dropped after the idle time. Runs on the event loop."""
+    `acquire` loads it in a thread unless it is loaded; decodes take turns, dictation's first;
+    once no connection uses it, it is dropped after the idle time. Runs on the event loop."""
 
     def __init__(self, loader: Loader = load_recognizer) -> None:
         self._loader = loader
         self._key: RecognizerKey | None = None
         self._recognizer: asyncio.Future[Any] | None = None
-        self._decoding = asyncio.Lock()
+        self._decoding = Turns()
         self._users = 0
         self._unload_after_s: float | None = None
         self._unload_timer: asyncio.TimerHandle | None = None
@@ -177,11 +212,14 @@ class Engine:
             log.info("unloading Parakeet")
         self._recognizer, self._key = None, None
 
-    async def decode(self, recognizer: Any, audio: Samples, hotwords: str | None) -> Decoded:
+    async def decode(
+        self, recognizer: Any, audio: Samples, hotwords: str | None, *, first: bool = False
+    ) -> Decoded:
+        """`first`: a dictation's decode, which goes before every waiting decode of others."""
         # A decode counts as a user until its thread is done, even if its caller is cancelled.
         self._users += 1
         try:
-            await self._decoding.acquire()
+            await self._decoding.acquire(first=first)
         except BaseException:
             self.release()
             raise
@@ -294,6 +332,7 @@ class ParakeetBackend(Backend):
         unload_after_s = self._config.unload_after_minutes * 60 or None
         loading = self._engine.acquire(key, unload_after_s)
         model = self._model
+        dictation = options.dictation
 
         async def ready() -> None:
             try:
@@ -309,7 +348,7 @@ class ParakeetBackend(Backend):
 
         async def decode(audio: Samples) -> Decoded:
             recognizer = await asyncio.shield(loading)
-            return await self._engine.decode(recognizer, audio, terms)
+            return await self._engine.decode(recognizer, audio, terms, first=dictation)
 
         return ParakeetConnection(
             connection_id, sink, decode, ready=ready, on_end=self._engine.release

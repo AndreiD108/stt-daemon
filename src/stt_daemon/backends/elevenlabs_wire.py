@@ -1,4 +1,4 @@
-"""ElevenLabs realtime tables: language codes and error messages."""
+"""ElevenLabs realtime tables: language codes, error messages, concurrency refusals."""
 
 # ISO 639-1 where one exists (detection reports these), else ISO 639-3; EL takes either.
 LANGUAGES = (
@@ -28,3 +28,7 @@ ERRORS: dict[str, tuple[str, bool]] = {
     "transcriber_error": ("backend_error", True),
     "error": ("backend_error", True),
 }
+
+# In an HTTP 429 body: the plan's concurrent connections are all in use. `detail.code` in the
+# current error format; the older `detail.status` value.
+CONCURRENCY_REFUSALS = (b"concurrent_limit_exceeded", b"too_many_concurrent_requests")

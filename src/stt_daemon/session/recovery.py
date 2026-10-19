@@ -5,7 +5,7 @@ A commit's answer drops the log up to that commit before the session hears of it
 holds exactly what no connection has answered yet. When a connection ends, the next one gets the
 whole log first, paced, then live audio; audio that comes meanwhile waits in the log. A
 connection rolls over before the backend's time limit: at a pause near the limit, or mid-speech
-when closer still.
+when closer still. A suspended link has no connection; its log keeps growing, as int16.
 """
 
 import asyncio
@@ -17,6 +17,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
+from ..audio.frames import PackedFrame
 from ..backends.base import (
     Backend,
     BackendEvent,
@@ -56,7 +57,24 @@ class _Point:
     final: bool
 
 
-type _Item = Outgoing | _Point
+@dataclass(frozen=True)
+class _Kept:
+    """Audio queued while suspended."""
+
+    frame: PackedFrame
+    cut: bool
+
+
+type _Audio = Outgoing | _Kept
+type _Item = _Audio | _Point
+
+
+def _size(item: _Audio) -> int:
+    return item.frame.pcm.size if isinstance(item, _Kept) else item.frame.samples.size
+
+
+def _unpacked(items: list[_Audio]) -> list[Outgoing]:
+    return [i if isinstance(i, Outgoing) else Outgoing(i.frame.unpack(), i.cut) for i in items]
 
 
 class _Fatal(Exception):
@@ -108,10 +126,19 @@ class Link:
         self._roll_due = False
         self._catch_up: tuple[float, int] | None = None
         """(start, samples sent) while the log is replayed onto a new connection."""
+        self._replay_samples = 0
         self._failures = 0
         self._context = options.previous_text or ""
         self._uncertain: list[Committed] = []
         self._alive = True
+        self._suspended = False
+        self._reopen = False
+        """Open a connection even with nothing to send (after a resume)."""
+        self._opened: asyncio.Future[None] | None = None
+        self._closed_for_suspend = asyncio.Event()
+        self._closed_for_suspend.set()
+        self.sent_samples = 0
+        """Audio sent on every connection so far; grows during replay too."""
         self._wake = asyncio.Event()
         self._progress = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
@@ -119,14 +146,68 @@ class Link:
     async def open(self) -> None:
         """Open the first connection and start sending. Raises `OpenFailed`."""
         await self._open()
+        self._start()
+
+    def _start(self) -> None:
         self._task = asyncio.create_task(self._run())
         self._task.add_done_callback(self._run_done)
 
     def queue(self, out: Outgoing) -> None:
-        if out.frame.samples.size:
-            self._log.append(out)
-            self._log_samples += out.frame.samples.size
+        if size := out.frame.samples.size:
+            self._log.append(_Kept(out.frame.pack(), out.cut) if self._suspended else out)
+            self._log_samples += size
             self._wake.set()
+
+    @property
+    def suspended(self) -> bool:
+        return self._suspended
+
+    @property
+    def alive(self) -> bool:
+        return self._alive
+
+    async def suspend(self) -> None:
+        """Close the connection and send nothing until `resume`; the log keeps growing."""
+        if not self._alive or self._suspended:
+            return
+        self._suspended = True
+        self._progress.set()
+        self._closed_for_suspend.clear()
+        try:
+            task, self._task = self._task, None
+            if task is not None:
+                task.cancel()
+                await asyncio.wait([task])
+            self._lost, self._roll_due, self._catch_up, self._reopen = None, False, None, False
+            await self._close_conn()
+        finally:
+            self._closed_for_suspend.set()
+
+    async def resume(self) -> bool:
+        """Open a new connection, which gets the log first. True once it is open; False when
+        the link failed, closed or was suspended again first."""
+        # The old connection must be gone first: the provider may count it, and closing it
+        # resets which connection's events are accepted.
+        await self._closed_for_suspend.wait()
+        if not self._alive or not self._suspended:
+            return False
+        self._suspended = False
+        self._progress.set()
+        self._reopen = True
+        self._opened = opened = asyncio.get_running_loop().create_future()
+        self._start()
+        assert self._task is not None
+        await asyncio.wait([opened, self._task], return_when=asyncio.FIRST_COMPLETED)
+        return opened.done()
+
+    def fail(self, code: str, message: str) -> None:
+        """Give up for a reason found outside the link."""
+        if not self._alive:
+            return
+        self._alive = False
+        self._publish_uncertain()
+        self._on_fatal(code, message)
+        self._progress.set()
 
     @property
     def backlog_s(self) -> float:
@@ -138,6 +219,9 @@ class Link:
         TimeoutError when the backend answers nothing for `stall_s` meanwhile."""
         while self._alive and self.backlog_s > max_s:
             self._progress.clear()
+            if self._suspended:
+                await self._progress.wait()
+                continue
             async with asyncio.timeout(stall_s):
                 await self._progress.wait()
 
@@ -187,8 +271,8 @@ class Link:
                 if self._lost is not None:
                     await self._recover()
                 elif self._conn is None:
-                    if self._log:
-                        await self._reconnect(cooldown=True)
+                    if self._log or self._reopen:
+                        await self._reconnect(cooldown=not self._reopen)
                     else:
                         await self._wake.wait()
                 elif self._roll_due:
@@ -200,31 +284,26 @@ class Link:
                     self._catch_up = None
                     await self._wake.wait()
         except _Fatal as exc:
-            self._alive = False
-            self._publish_uncertain()
-            self._on_fatal(exc.code, exc.message)
-            self._progress.set()
+            self.fail(exc.code, exc.message)
             await self._close_conn()
 
     def _run_done(self, task: asyncio.Task[None]) -> None:
         if task.cancelled() or (error := task.exception()) is None:
             return
         log.error("backend link failed", exc_info=error)
-        self._alive = False
-        self._progress.set()
-        self._on_fatal("internal", f"the daemon failed while talking to the backend: {error}")
+        self.fail("internal", f"the daemon failed while talking to the backend: {error}")
 
     def _ready(self) -> tuple[list[Outgoing], _Point | None] | None:
         """Unsent audio up to a chunk or to the next commit, when there is that much."""
-        audio: list[Outgoing] = []
+        audio: list[_Audio] = []
         samples = 0
         for item in itertools.islice(self._log, self._sent, None):
             if isinstance(item, _Point):
-                return audio, item
+                return _unpacked(audio), item
             audio.append(item)
-            samples += item.frame.samples.size
+            samples += _size(item)
             if samples >= self._chunk:
-                return audio, None
+                return _unpacked(audio), None
         return None
 
     async def _send(self, audio: list[Outgoing], point: _Point | None) -> None:
@@ -237,6 +316,7 @@ class Link:
             self._sent += len(audio)
             samples = np.concatenate([out.frame.samples for out in audio])
             await self._bounded(conn, conn.send_audio(samples))
+            self.sent_samples += samples.size
             await self._pace(samples.size)
         if point is not None:
             self._sent += 1  # before the await: a backend may answer inside commit()
@@ -252,9 +332,11 @@ class Link:
                 self._lost = Failed(conn.connection_id, "network", message, retryable=True)
 
     async def _pace(self, samples: int) -> None:
-        if self._catch_up is None:
+        if self._catch_up is None or not self._backend.capabilities.paced_replay:
             return
         started, sent = self._catch_up
+        if sent >= self._replay_samples:
+            return  # past the log as it was at the open: newer audio isn't held back
         sent += samples
         self._catch_up = (started, sent)
         ahead = started + sent / self._timeline.sample_rate / REPLAY_RATE - time.monotonic()
@@ -311,10 +393,14 @@ class Link:
             message = f"no connection after {OPEN_TIMEOUT_S:g} s"
             raise OpenFailed("network", message, retryable=True) from None
         self._conn = conn
+        self._reopen = False
+        if self._opened is not None and not self._opened.done():
+            self._opened.set_result(None)
         self._uncertain.clear()
         self._sent = 0
         self._acked_samples = 0
         self._catch_up = (time.monotonic(), 0) if self._log else None
+        self._replay_samples = self._log_samples
 
     async def _roll(self) -> None:
         try:
@@ -410,9 +496,10 @@ class Link:
 
     def _drop(self, count: int) -> None:
         for item in self._log[:count]:
-            if isinstance(item, Outgoing):
-                self._acked_samples += item.frame.samples.size
-                self._log_samples -= item.frame.samples.size
+            if isinstance(item, _Point):
+                continue
+            self._acked_samples += _size(item)
+            self._log_samples -= _size(item)
         del self._log[:count]
         self._sent -= count
 
@@ -421,8 +508,8 @@ class Link:
         count = 0
         acked = self._acked_samples
         for item in self._log[: self._sent]:
-            if isinstance(item, _Point) or acked + item.frame.samples.size > offset:
+            if isinstance(item, _Point) or acked + _size(item) > offset:
                 break
-            acked += item.frame.samples.size
+            acked += _size(item)
             count += 1
         self._drop(count)

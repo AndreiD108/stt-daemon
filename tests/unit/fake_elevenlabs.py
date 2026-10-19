@@ -42,6 +42,7 @@ class FakeElevenLabs:
         self.messages: list[dict[str, Any]] = []
         self.status: int | None = None
         """Answer the handshake with this HTTP status instead of upgrading."""
+        self.status_body = "refused\n"
         self.greeting: list[dict[str, Any]] = [
             {"message_type": "session_started", "session_id": "sess-1", "config": {}}
         ]
@@ -65,7 +66,7 @@ class FakeElevenLabs:
     def process_request(self, conn: ServerConnection, request: Request) -> Response | None:
         self.requests.append(request)
         if self.status is not None:
-            return conn.respond(self.status, "refused\n")
+            return conn.respond(self.status, self.status_body)
         return None
 
     async def handle(self, conn: ServerConnection) -> None:

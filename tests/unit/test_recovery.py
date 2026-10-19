@@ -387,3 +387,96 @@ async def test_the_backend_time_limit_is_a_retried_failure() -> None:
     await rig.link.close()
     assert rig.errors == ["session_limit"]
     assert rig.committed == [("after", True)]
+
+
+def _pcm(first: int, count: int, end_s: float) -> Outgoing:
+    """Audio in int16 range: sample n is n / 32768, so it survives packing."""
+    samples = (np.arange(first, first + count) / 32768).astype(np.float32)
+    return Outgoing(Frame(samples, end_s, RATE), cut=False)
+
+
+async def test_suspend_keeps_the_log_and_resume_replays_it_on_a_new_connection() -> None:
+    rig = await started(FakeBackend(["one"]))
+    rig.speak(200)
+    await rig.until(lambda: rig.conn(0).sent_s >= 0.2)
+    await rig.link.suspend()
+    assert rig.conn(0).ended
+    assert rig.link.suspended
+    rig.link.queue(_pcm(1000, 3200, 0.4))
+    rig.link.commit()
+    await asyncio.sleep(0.2)
+    assert len(rig.backend.connections) == 1
+    assert rig.link.backlog_s == pytest.approx(0.4)
+    assert await rig.link.resume()
+    await rig.until(lambda: rig.committed)
+    audio = rig.conn(1).audio
+    assert [int(x) for x in audio[:3200]] == span(0, 3200)
+    assert np.array_equal(np.rint(audio[3200:] * 32768), np.arange(1000, 4200))
+    assert rig.committed == [("one", False)]
+    assert rig.link.backlog_s == 0
+    await rig.link.close()
+
+
+@pytest.mark.parametrize("paced", [True, False])
+async def test_the_replay_after_resume_is_paced_unless_the_backend_is_local(paced: bool) -> None:
+    caps = replace(FAKE_CAPABILITIES, paced_replay=paced)
+    rig = await started(FakeBackend(capabilities=caps))
+    await rig.link.suspend()
+    rig.speak(1000)
+    began = time.monotonic()
+    assert await rig.link.resume()
+    await rig.until(lambda: rig.conn(1).sent_s >= 1.0)
+    took = time.monotonic() - began
+    assert took >= 0.4 if paced else took < 0.2
+    await rig.link.close()
+
+
+async def test_suspend_cancels_a_reconnect_and_resume_opens_one() -> None:
+    rig = await started(FakeBackend())
+    rig.speak(200)
+    await rig.until(lambda: rig.conn(0).sent_s >= 0.2)
+    rig.backend.open_delay_s = 0.3
+    rig.backend.fail()
+    await rig.until(lambda: rig.backend.open_calls == 2)
+    await rig.link.suspend()
+    await asyncio.sleep(0.4)
+    assert len(rig.backend.connections) == 1
+    assert rig.backend.open_calls == 2
+    rig.backend.open_delay_s = 0.0
+    assert await rig.link.resume()
+    await rig.until(lambda: rig.conn(1).sent_s >= 0.2)
+    assert numbers(rig.conn(1)) == span(0, 3200)
+    await rig.link.close()
+
+
+async def test_a_suspended_link_does_not_time_out_on_its_backlog() -> None:
+    rig = await started(FakeBackend())
+    await rig.link.suspend()
+    rig.speak(1000)
+    waiting = asyncio.create_task(rig.link.wait_backlog(0.1, stall_s=0.1))
+    await asyncio.sleep(0.4)
+    assert not waiting.done()
+    rig.link.fail("config", "the backend is gone")
+    await asyncio.wait_for(waiting, 1.0)
+    assert rig.fatal == ["config"]
+    assert not await rig.link.resume()
+    await rig.link.close()
+
+
+async def test_resume_waits_for_the_suspend_to_close_the_old_connection() -> None:
+    rig = await started(FakeBackend(["one"]))
+    rig.speak(200)
+    await rig.until(lambda: rig.conn(0).sent_s >= 0.2)
+    rig.backend.close_gate = gate = asyncio.Event()
+    suspending = asyncio.create_task(rig.link.suspend())
+    await asyncio.sleep(0.05)
+    resuming = asyncio.create_task(rig.link.resume())
+    await asyncio.sleep(0.1)
+    assert rig.backend.open_calls == 1
+    gate.set()
+    await suspending
+    assert await resuming
+    rig.link.commit()
+    await rig.until(lambda: rig.committed)
+    assert rig.committed == [("one", False)], "the new connection's answers count"
+    await rig.link.close()

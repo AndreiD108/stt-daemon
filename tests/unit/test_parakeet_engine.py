@@ -354,3 +354,36 @@ async def test_a_decode_left_running_by_a_closed_session_keeps_the_old_settings(
     await (await new_backend.open(OpenOptions(), 3, lambda _: None)).close()
     await _until(lambda: len(loader.made) == 2)
     assert [k.num_threads for k in loader.keys] == [2, 3]
+
+
+async def test_a_dictation_decode_goes_before_waiting_decodes_of_others() -> None:
+    engine = Engine()
+    recognizer = _Recognizer(RecognizerKey(Path("m"), 1, 1.5), decode_s=0.1)
+    done: list[str] = []
+
+    async def decode(name: str, *, first: bool) -> None:
+        await engine.decode(recognizer, _audio(0.2), None, first=first)
+        done.append(name)
+
+    running = asyncio.create_task(decode("file", first=False))
+    await _until(lambda: recognizer.running == 1)
+    waiting = [asyncio.create_task(decode(f"file-{i}", first=False)) for i in (1, 2)]
+    await asyncio.sleep(0.01)
+    dictation = asyncio.create_task(decode("mic", first=True))
+    await asyncio.gather(running, *waiting, dictation)
+    assert done == ["file", "mic", "file-1", "file-2"]
+    assert recognizer.most_running == 1
+
+
+async def test_a_cancelled_waiter_passes_its_turn_on() -> None:
+    turns = parakeet.Turns()
+    await turns.acquire(first=False)
+    gone = asyncio.create_task(turns.acquire(first=True))
+    after = asyncio.create_task(turns.acquire(first=False))
+    await asyncio.sleep(0)
+    gone.cancel()
+    await asyncio.wait([gone])
+    turns.release()
+    await asyncio.wait_for(after, 1.0)
+    turns.release()
+    await asyncio.wait_for(turns.acquire(first=False), 1.0)

@@ -8,7 +8,7 @@ from ..backends import BACKENDS
 from ..backends.base import Backend, BackendUnavailable, OpenOptions
 from ..config import Config
 from ..credentials import Credentials
-from ..session.session import SessionOptions
+from ..session.options import SessionOptions
 from .messages import RequestError, StartRequest
 
 log = logging.getLogger(__name__)

@@ -113,6 +113,7 @@ async def test_busy_then_eviction_end_to_end(daemon: Harness) -> None:
             "kind": "mic",
             "pid": os.getpid(),
             "client_label": "Scribbly",
+            "suspended": False,
         }
     ]
     refused = await talkey.request("start_session")

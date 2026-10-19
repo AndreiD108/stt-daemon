@@ -47,13 +47,17 @@ src/                      package source
       wire.py             session and VAD events → protocol event data (words, after_word only when asked)
       backend_set.py      Setup: backends set up here, default; resolve a start (language, features, hints)
       slot.py             Slot: mic slot idle/busy/evictable, takeover order, backend-only (transcribe) starts, slot changes
-      backend_slots.py    BackendSlots: per-backend max_sessions and the sessions holding them
+      slot_state.py       Client, Holder, SlotState (wire form), StartRefused (busy / session_active details)
+      backend_slots.py    BackendSlots: per-backend max_sessions, the sessions holding them, suspended ones
       speech.py           SpeechWatch: daemon-wide VAD on all mic audio; VAD events, speech starts by id
       peer.py             socket peer's pid and cmdline: SO_PEERCRED + /proc; macOS LOCAL_PEERPID + KERN_PROCARGS2
     session/              one session: capture → VAD → pause cutting → backend → segments
       __init__.py         empty package marker
-      session.py          Session: start, audio loop, commit cadence (wall or audio time), stop (bounded) / cancel / error end
-      recovery.py         Link: unanswered-audio log, in-order sends, rollover, reconnect, paced replay
+      session.py          Session: start, audio loop, commit cadence (wall or audio time), stop (bounded) / cancel / error end, suspend / resume
+      options.py          SessionOptions, MarkerRefused, start_point (where a started session takes its audio from)
+      recovery.py         Link: unanswered-audio log, in-order sends, rollover, reconnect, paced replay, suspend (int16 log) / resume
+      segments.py         backend answers → segments: session times via timeline, markers placed, leftover markers
+      moving.py           while_moving: wait bounded by no progress, paused time not counted
       events.py           what a session emits: started, partial, error, ended (+ evicted_by); segments from transcript
       pause_gate.py       PauseGate: sends speech and short pauses, holds long ones back to a pre-speech pad
       timeline.py         sent audio per connection ↔ capture time; backend seconds → session ms
@@ -103,6 +107,8 @@ tests/
     test_config.py        paths per OS, defaults, type errors, Parakeet limits, config writer and key removal
     test_credentials.py   mode/owner checks, precedence, writer, stdin parsing, no key in errors
     test_slot.py          slot states, sticky evictable, takeover order and failures, client_gone
+    slot_harness.py       Slot test rig: recorded events and slot changes, session makers, test clients
+    test_slot_priority.py  dictation priority: victim choice, resume order, backend gone, concurrency refusal retry
     test_peer.py          peer pid/cmdline over real Unix sockets; macOS parsing on fixture bytes
     test_messages.py      envelope parsing, encoding, per-command field checks
     test_backend_set.py   setup and default, language default and checks, features, hints, context lookup
@@ -120,6 +126,7 @@ tests/
     test_daemon_lifecycle.py  socket file, shutdown, context store, marker times
     test_daemon_speech.py     VAD event routing, speech_id starts (edge, expiry, mic closed, eviction)
     test_daemon_transcribe.py transcribe: ffmpeg and raw PCM, file-time word times, slots beside mic, decoder errors
+    test_daemon_priority.py   transcribe suspended by a dictation: same output as unsuspended; blocked writer stalls no one
     test_cli_daemon.py        key set reloads the daemon; listen prints segments, exit codes
     test_parakeet_daemon.py   `slow`, real model: commits at pauses, word times at speech edges, keyterms per stream
   live/                   opt-in (`pytest -m live`): real mic, real backend key

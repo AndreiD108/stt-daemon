@@ -24,10 +24,11 @@ from ..credentials import CredentialsError
 from ..service.preflight import check_tool
 from ..session.context import ContextStore, scope_of
 from ..session.events import SessionEnded, SessionEvent, SessionStarted
-from ..session.session import MarkerRefused, Session
+from ..session.options import MarkerRefused
+from ..session.session import Session
 from . import wire
 from .backend_set import Setup, resolve
-from .connection import LINE_LIMIT, Connection, prepare_socket, readline
+from .connection import LINE_LIMIT, Connection, prepare_socket, put_until_gone, readline
 from .messages import (
     PROTOCOL,
     Message,
@@ -41,7 +42,8 @@ from .messages import (
     parse_transcribe,
 )
 from .peer import peer_of
-from .slot import Client, ClientGone, Slot, SlotState, StartRefused
+from .slot import ClientGone, Slot
+from .slot_state import Client, SlotState, StartRefused
 from .speech import SpeechWatch
 
 log = logging.getLogger(__name__)
@@ -213,12 +215,12 @@ class Server:
             try:
                 message = parse_line(line)
             except RequestError as exc:
-                await queue.put((exc, arrived))
+                await put_until_gone(conn, queue, (exc, arrived))
                 continue
             if message.type == "ping":
                 conn.send("pong", {}, message.id)
             else:
-                await queue.put((message, arrived))
+                await put_until_gone(conn, queue, (message, arrived))
 
     async def _disconnect(self, conn: Connection) -> None:
         conn.closed = True

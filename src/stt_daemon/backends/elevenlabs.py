@@ -49,7 +49,7 @@ from .base import (
     merge_keyterms,
     trim_previous_text,
 )
-from .elevenlabs_wire import ERRORS, LANGUAGES
+from .elevenlabs_wire import CONCURRENCY_REFUSALS, ERRORS, LANGUAGES
 
 logger = logging.getLogger(__name__)
 # websockets logs the handshake headers, the API key among them, at DEBUG.
@@ -215,7 +215,7 @@ class ElevenLabsConnection(Connection):
                 logger=_ws_logger,
             )
         except websockets.InvalidStatus as exc:
-            raise _status_failure(exc.response.status_code) from None
+            raise _status_failure(exc.response.status_code, exc.response.body) from None
         except websockets.InvalidURI as exc:
             raise OpenFailed("invalid_request", str(exc), retryable=False) from None
         except (OSError, websockets.WebSocketException) as exc:
@@ -423,10 +423,17 @@ class ElevenLabsConnection(Connection):
             self._reader.cancel()
 
 
-def _status_failure(status: int) -> OpenFailed:
+def _status_failure(status: int, body: bytes | bytearray | None) -> OpenFailed:
     if status in (401, 403):
         return OpenFailed(
             "auth", f"ElevenLabs refused the API key (HTTP {status})", retryable=False
+        )
+    if status == 429 and any(code in (body or b"") for code in CONCURRENCY_REFUSALS):
+        return OpenFailed(
+            "concurrency_limit",
+            "ElevenLabs refused another connection: the plan's concurrent sessions are in use "
+            "(HTTP 429)",
+            retryable=False,
         )
     if status == 429:
         return OpenFailed("rate_limited", "ElevenLabs rate limit (HTTP 429)", retryable=False)

@@ -14,6 +14,15 @@ Sessions come in two kinds:
   ffmpeg reads, or raw PCM. It takes one backend slot and no mic slot, so it runs next to a mic
   session and is never evictable. It runs as fast as the audio arrives.
 
+Dictation comes first. When a `start_session` finds its backend full and a session of another kind
+holds a slot there, the daemon suspends that session instead of refusing the start: of the lowest
+kind, the most recently started. A suspended session loses nothing. It drops its backend
+connection and keeps its audio; when a slot on its backend frees, it resumes and the backend gets
+the kept audio, longest suspended first. Its client gets `session_suspended` and
+`session_resumed`. Only a `mic` session suspends, and never another `mic` session; those starts
+get `busy`. On Parakeet, a `mic` session's next decode also goes before other kinds' waiting
+decodes; a running decode is never interrupted.
+
 A minimal client: connect, send `hello`, read `welcome`, send `start_session`, read `segment`
 events, send `stop_session`, read `session_ended`. Error codes are in [Error codes](#error-codes).
 
@@ -121,8 +130,8 @@ start with `unsupported` when the backend lacks them.
 
 Checks run in this order, before either slot changes: field types (`bad_request`), `speech_id`
 (`speech_expired`), the mic slot (`session_active`, `busy`), the backend, language and features,
-then room on the backend (`busy`). So a request for a missing backend sent while the mic slot is
-`busy` gets `busy`. An evictable holder's session doesn't count against its backend's capacity:
+then room on the backend (`busy`, unless a session of another kind there can be suspended; see
+the intro). So a request for a missing backend sent while the mic slot is `busy` gets `busy`. An evictable holder's session doesn't count against its backend's capacity:
 a start that would evict it is refused only when the backend is full without it, and then nothing
 is evicted.
 
@@ -173,6 +182,12 @@ of audio with no pause (25 s for ElevenLabs, `backends.parakeet.max_chunk_second
 Parakeet); it has no wall-clock commits. It sends `progress` events as it goes. It takes no more
 audio while 60 s of it (or twice the chunk cap, if more) waits for the backend's text; a backend
 that then answers nothing for 60 s ends the session with a fatal `backend_error`.
+
+While suspended for a dictation, the session goes on taking in audio up to that 60 s limit, then
+stops like any session that is behind: the daemon stops reading the connection, so commands sent
+after that `audio`, `stop_session` and `cancel_session` included, wait for the resume. To drop a
+suspended session at once, disconnect. Suspended time doesn't count as the backend answering
+nothing.
 
 Reply: `session_started` (`kind: "transcribe"`), or `error` with one of the start codes.
 
@@ -238,6 +253,11 @@ audio taken and no text from the backend. Input ffmpeg can't decode, or no audio
 session with `session_error {code: "invalid_request", fatal: true}`, whose message holds the end
 of ffmpeg's error output, and `session_ended` (reason `error`).
 
+A session that was suspended, or is suspended when the stop comes, finishes after it resumes: it
+transcribes all the audio it kept, then answers `session_ended`, which can come minutes later.
+Waiting for a slot doesn't count against the stop wait; as for `transcribe`, the stop gives up only
+after `session.stop_wait_ms` with no progress once resumed. `cancel_session` drops the kept audio.
+
 ### `cancel_session`
 
 ```json
@@ -260,7 +280,9 @@ Re-reads config and credentials and rescans installed backends. Sent by the `stt
 its backend, even one no longer set up; a removed Parakeet model leaves memory when its last
 session ends. New `backends.parakeet.num_threads` and `hotwords_score` values apply once no
 Parakeet session is running. A new `max_sessions` applies to the next start; a backend over its new
-capacity keeps its sessions until they end. When backends or capacities change, a `slot` event
+capacity keeps its sessions until they end. A suspended session whose backend is no longer set up
+ends with `session_error {code: "config", fatal: true}` and `session_ended` with what it
+committed. When backends or capacities change, a `slot` event
 follows the `backends` event. Changes to `[audio]` and `[slot]` take effect when the daemon
 restarts. `[vad]` changes apply to
 sessions started after the reload, but VAD events keep the old settings until a restart. Reply: `backends`; every
@@ -337,7 +359,9 @@ released, and when a `reload` changes the backends or their `max_sessions`.
   "backends": {
     "elevenlabs": {
       "max_sessions": 2,
-      "sessions": [{"session_id": "…", "kind": "mic", "pid": 41230, "client_label": "Scribbly"}]
+      "sessions": [
+        {"session_id": "…", "kind": "mic", "pid": 41230, "client_label": "Scribbly", "suspended": false}
+      ]
     },
     "parakeet": {"max_sessions": 2, "sessions": []}
   }
@@ -361,6 +385,8 @@ released, and when a `reload` changes the backends or their `max_sessions`.
   while it still has sessions. `pid` and `client_label` can be `null`. During a takeover, the
   evicted session stays listed until its `session_ended`, so a backend can briefly list more
   sessions than `max_sessions`.
+- `suspended`: the session is suspended for a dictation and waits for a slot; it doesn't count
+  against `max_sessions`. Suspended sessions come after the others, longest suspended first.
 
 ### `session_started`
 
@@ -445,6 +471,25 @@ How much of a `transcribe` session's audio the session has taken in, in seconds 
 At most one a second while the audio comes, and one more once the input is complete
 (`stop_session`), with the total.
 
+### `session_suspended`
+
+```json
+{"session_id": "…", "reason": "preempted", "by": {"kind": "mic", "pid": 5120, "client_label": "Talkey"}}
+```
+
+A dictation took this session's slot on its backend; see the intro. Only to the session's client
+and observers. `by` is the dictation's session: `pid` and `client_label` can be `null`. The session
+keeps its audio and its markers; `segment` events stop until it resumes.
+
+### `session_resumed`
+
+```json
+{"session_id": "…", "suspended_seconds": 42.5}
+```
+
+The session has a slot again and its backend connection is open (for Parakeet, it is in the decode
+queue again); the audio kept meanwhile goes first. `suspended_seconds`: wall time suspended.
+
 ### `session_ended`
 
 ```json
@@ -507,7 +552,7 @@ Codes of `error` replies, and of `session_error` for the backend codes.
 | `protocol_unsupported` | `hello` | `supported` lists the daemon's protocol versions. |
 | `observers_disabled` | `hello` | The config has `server.observers = false`; connect without `observe_all`. |
 | `bad_request` | any | Not a valid message or command; `field` names a field of the wrong type. |
-| `busy` | `start_session`, `transcribe` | A slot is full; `slot` has every slot. `full_slot`: `mic` (another client holds the mic slot; wait for a `slot` event with `idle` or `evictable`) or `backend` (`backend` runs `max_sessions` sessions; wait for room or use another backend). `holder` (`pid`, `client_label`, `kind`; the first two can be `null`) is the session in the way: the mic holder, or the oldest on the backend. |
+| `busy` | `start_session`, `transcribe` | A slot is full and no session there can be suspended; `slot` has every slot. `full_slot`: `mic` (another client holds the mic slot; wait for a `slot` event with `idle` or `evictable`) or `backend` (`backend` runs `max_sessions` sessions; wait for room or use another backend). `holder` (`pid`, `client_label`, `kind`; the first two can be `null`) is the session in the way: the mic holder, or the oldest on the backend. |
 | `session_active` | `start_session`, `transcribe` | This client already holds a session; `slot` has it. Stop it first. |
 | `speech_expired` | `start_session` | The `speech_id` is unknown or its start left the buffer. Start without it. |
 | `no_backend` | `start_session`, `transcribe` | No backend set up; the message names `stt-daemon key set elevenlabs` and `stt-daemon backend install parakeet`. |
@@ -534,6 +579,7 @@ the cause.
 | `quota` | no | The account is out of quota. |
 | `invalid_request` | no | The backend rejected the request or the audio; for `transcribe`, also input ffmpeg can't decode. |
 | `model_error` | no | The local model didn't load; the message names the directory to delete before reinstalling. |
+| `concurrency_limit` | no | The provider refused one more connection: the account's concurrent sessions are in use. A `start_session` that gets it suspends a session of another kind on that backend, if there is one, and tries once more. |
 | `rate_limited` | yes, during a session | Throttled. At start (HTTP 429) it isn't retried; start again later. |
 | `network` | yes | The connection failed or timed out. |
 | `backend_error` | yes (ElevenLabs), no (Parakeet decode) | The backend failed. |

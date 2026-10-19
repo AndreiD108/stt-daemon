@@ -13,7 +13,8 @@ from stt_daemon.backends.base import CommitPolicy, OpenOptions
 from stt_daemon.backends.fake import FAKE_CAPABILITIES, FakeBackend, FakeReply
 from stt_daemon.config import Config
 from stt_daemon.session.events import PartialText, SessionEnded, SessionEvent
-from stt_daemon.session.session import Session, SessionOptions
+from stt_daemon.session.options import SessionOptions
+from stt_daemon.session.session import Session
 from stt_daemon.session.transcript import Segment
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "two_phrases.wav"

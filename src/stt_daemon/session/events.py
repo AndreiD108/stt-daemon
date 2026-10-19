@@ -8,6 +8,9 @@ from .transcript import Segment
 type EndReason = Literal["stopped", "cancelled", "evicted", "client_gone", "error"]
 type SessionKind = Literal["mic", "transcribe"]
 
+KIND_RANK: dict[SessionKind, int] = {"mic": 0, "transcribe": 2}
+"""Lower ranks first: a dictation suspends the highest-ranked session in its way."""
+
 
 @dataclass(frozen=True)
 class SessionStarted:
@@ -47,6 +50,23 @@ class EvictedBy:
 
 
 @dataclass(frozen=True)
+class PreemptedBy:
+    kind: SessionKind
+    pid: int | None
+    client_label: str | None
+
+
+@dataclass(frozen=True)
+class SessionSuspended:
+    by: PreemptedBy
+
+
+@dataclass(frozen=True)
+class SessionResumed:
+    suspended_seconds: float
+
+
+@dataclass(frozen=True)
 class SessionEnded:
     reason: EndReason
     final_text: str
@@ -58,4 +78,13 @@ class SessionEnded:
     """`final_text` without markers."""
 
 
-type SessionEvent = SessionStarted | PartialText | Progress | Segment | SessionError | SessionEnded
+type SessionEvent = (
+    SessionStarted
+    | PartialText
+    | Progress
+    | Segment
+    | SessionError
+    | SessionSuspended
+    | SessionResumed
+    | SessionEnded
+)

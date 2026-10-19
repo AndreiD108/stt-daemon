@@ -47,6 +47,22 @@ class Frame:
             return self
         return Frame(self.samples[skip:], self.end, self.sample_rate)
 
+    def pack(self) -> "PackedFrame":
+        pcm = np.clip(np.rint(self.samples * 32768.0), -32768, 32767).astype(np.int16)
+        return PackedFrame(pcm, self.end, self.sample_rate)
+
+
+@dataclass(frozen=True)
+class PackedFrame:
+    """A frame as int16, half the memory, for audio that waits long."""
+
+    pcm: npt.NDArray[np.int16]
+    end: float
+    sample_rate: int
+
+    def unpack(self) -> Frame:
+        return Frame(self.pcm.astype(np.float32) / 32768.0, self.end, self.sample_rate)
+
 
 @dataclass(eq=False)
 class Attachment:
