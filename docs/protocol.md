@@ -136,8 +136,8 @@ All fields optional.
 
 Hints (`keyterms`, `previous_text`, `context_key`) are dropped when the backend can't use them; the
 backend's entry in `welcome` says which it takes. Features (`partials`, `word_timestamps`) fail the
-start with `unsupported` when the backend lacks them; so does a backend whose `kinds` lacks the
-session's kind.
+start with `unsupported` when the backend's entry has them `false`; so does a backend whose `kinds`
+lacks the session's kind.
 
 Checks run in this order, before either slot changes: field types (`bad_request`), `speech_id`
 (`speech_expired`), the mic slot (`session_active`, `busy`), the backend, language and features,
@@ -334,7 +334,8 @@ placed:
   `at`; committed text never changes. (A commit can be on its way when the marker arrives; a
   marker from after that commit's cut waits for the next segment.)
 - Inside that segment it goes into the gap between words nearest `at`: from word times when the
-  backend has them, else from character lengths across the segment's span. When `at` is before the
+  segment has them (all but a whole-file backend without them), else from character lengths across
+  the segment's span. When `at` is before the
   segment's first word (a marker that arrived late, or in a pause), it goes first (`after_word: -1`);
   `at_ms` keeps the true time.
 - Markers still waiting at stop, including in a session with no speech at all, come in a last
@@ -575,7 +576,9 @@ session, `track` names the track, and a partial replaces only that track's previ
 - `markers`: those placed in this segment; missing when there are none. `at_ms` is the
   marker's time (from `at` or arrival).
 - `words`, and `after_word` on each marker: only with `word_timestamps: true`. `after_word` is
-  the index in `words` of the word the marker follows, `-1` before the first.
+  the index in `words` of the word the marker follows, `-1` before the first. A backend that
+  answers with text only still yields `words`: the daemon estimates their times from the audio,
+  splitting each stretch of speech over its words by syllable count.
 - `speaker` (on the segment and on each word, as `"speaker_0"`, `"speaker_1"`, …): only in a
   session with `diarize: true`. Segments split where the speaker changes, so a segment has one;
   missing when the backend named none.

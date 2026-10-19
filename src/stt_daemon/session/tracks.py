@@ -104,6 +104,7 @@ class Track:
             on_partial=lambda text: self._owner.track_partial(self, text),
             on_error=lambda code, message: self._owner.track_error(self, code, message),
             on_fatal=lambda code, message: self._owner.track_fatal(self, code, message),
+            speech=self._gate.speech,
         )
 
     async def open(self, make_room: Callable[[], Coroutine[Any, Any, bool]] | None) -> None:

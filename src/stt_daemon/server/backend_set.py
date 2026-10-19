@@ -44,7 +44,7 @@ class Setup:
             {
                 "name": name,
                 "languages": list(b.capabilities.languages),
-                "word_timestamps": b.capabilities.word_timestamps,
+                "word_timestamps": gives_word_times(b),
                 "partials": b.capabilities.partials,
                 "hints": sorted(b.capabilities.hints),
                 "diarize": b.capabilities.diarize,
@@ -83,6 +83,11 @@ def kinds_of(backend: Backend) -> tuple[SessionKind, ...]:
     return ("mic", "system", "transcribe")
 
 
+def gives_word_times(backend: Backend) -> bool:
+    """Its own, or estimated from the audio for answers without them (not for whole files)."""
+    return backend.capabilities.word_timestamps or not isinstance(backend, FileBackend)
+
+
 @dataclass(frozen=True)
 class Resolved:
     backend: Backend
@@ -115,7 +120,7 @@ def resolve(
         )
     if req.partials and not caps.partials:
         raise RequestError("unsupported", f"{name} has no partials; start without partials")
-    if req.word_timestamps and not caps.word_timestamps:
+    if req.word_timestamps and not gives_word_times(backend):
         raise RequestError(
             "unsupported", f"{name} has no word times; start without word_timestamps"
         )

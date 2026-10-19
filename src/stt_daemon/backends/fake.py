@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import collections
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Self
 
 import numpy as np
@@ -71,8 +71,13 @@ class FakeBackend(Backend):
         send_delay_s: float = 0.0,
         answer_on_close: bool = False,
         max_sessions: int = DEFAULT_MAX_SESSIONS,
+        text_only: bool = False,
     ) -> None:
-        self.capabilities = capabilities
+        """`text_only`: answers carry no word times, as from a backend without them."""
+        self.text_only = text_only
+        self.capabilities = (
+            replace(capabilities, word_timestamps=False) if text_only else capabilities
+        )
         self.capacity = max_sessions
         self.replies: collections.deque[FakeReply] = collections.deque(
             r if isinstance(r, FakeReply) else FakeReply(text=r) for r in replies
@@ -244,7 +249,7 @@ class FakeConnection(Connection):
                 pending.commit_id,
                 reply.text,
                 reply.language,
-                _words(reply, pending.start_s, pending.end_s),
+                None if self._backend.text_only else _words(reply, pending.start_s, pending.end_s),
                 pending.end_s,
             )
         )

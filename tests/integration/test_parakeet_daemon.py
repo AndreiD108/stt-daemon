@@ -2,14 +2,19 @@
 
 import base64
 import itertools
+import logging
+import statistics
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from harness import FIXTURE, Harness, Msg
 
+from stt_daemon.audio.frames import Frame
 from stt_daemon.audio.pw_capture import PwRecordCapture
 from stt_daemon.audio.wav_capture import WavCapture
+from stt_daemon.backends.base import Committed
 from stt_daemon.backends.install import is_installed
 from stt_daemon.backends.parakeet import (
     Engine,
@@ -19,6 +24,8 @@ from stt_daemon.backends.parakeet import (
     model_dir,
 )
 from stt_daemon.config import ParakeetConfig
+from stt_daemon.session import recovery
+from stt_daemon.session.word_times import Speech
 
 MODEL = model_dir()
 JARGON = Path(__file__).parents[1] / "fixtures" / "jargon.wav"
@@ -73,6 +80,33 @@ async def test_segments_commit_at_pauses_with_word_times(daemon: Harness) -> Non
         assert all(a["end_ms"] <= b["start_ms"] + 1 for a, b in itertools.pairwise(words))
         assert segment["start_ms"] <= words[0]["start_ms"]
         assert words[-1]["end_ms"] <= segment["end_ms"]
+
+
+async def test_estimated_word_times_come_near_parakeets_own(
+    daemon: Harness, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    errors_ms: list[float] = []
+    real_with_times = recovery.with_times
+
+    def compare(event: Committed, frames: list[Frame], speech: Speech, offset: int) -> Committed:
+        if event.words:
+            estimated = real_with_times(replace(event, words=None), frames, speech, offset)
+            assert estimated.words is not None
+            for real, guess in zip(event.words, estimated.words, strict=True):
+                errors_ms.append((guess.start_s - real.start_s) * 1000)
+        return event
+
+    monkeypatch.setattr(recovery, "with_times", compare)
+    await _session(daemon, [], [])
+    caplog.set_level(logging.INFO)
+    median = statistics.median(abs(e) for e in errors_ms)
+    logging.getLogger(__name__).info(
+        "estimate - Parakeet start, ms: median |error| %.0f, %s",
+        median,
+        [round(e) for e in errors_ms],
+    )
+    assert len(errors_ms) >= 30
+    assert median < 120
 
 
 async def test_keyterms_go_in_per_stream(daemon: Harness) -> None:

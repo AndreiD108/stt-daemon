@@ -88,7 +88,21 @@ def test_features_the_backend_lacks_fail_the_start() -> None:
         capabilities=replace(FAKE_CAPABILITIES, partials=False, word_timestamps=False)
     )
     assert refused(setup_of(plain), partials=True).code == "unsupported"
-    assert refused(setup_of(plain), word_timestamps=True).code == "unsupported"
+    timeless_files = FilesFake()
+    timeless_files.capabilities = replace(FilesFake.capabilities, word_timestamps=False)
+    setup = setup_of(timeless_files)
+    request = StartRequest(backend="b0", word_timestamps=True)
+    with pytest.raises(RequestError) as caught:
+        resolve(setup, request, no_lookup, kind="transcribe")
+    assert caught.value.code == "unsupported"
+
+
+def test_a_live_backend_without_word_times_still_takes_word_timestamps() -> None:
+    text_only = FakeBackend(text_only=True)
+    setup = setup_of(text_only)
+    resolved = resolve(setup, StartRequest(word_timestamps=True), no_lookup)
+    assert resolved.options.word_timestamps
+    assert setup.backends_wire()[0]["word_timestamps"] is True
 
 
 def test_hints_the_backend_cant_use_are_dropped() -> None:

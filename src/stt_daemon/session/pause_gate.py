@@ -4,7 +4,8 @@ Audio is sent while the VAD hears speech and until it confirms a pause (`vad.min
 so short pauses stay whole. Then audio is held back, keeping only the newest `hold_s`. When the
 VAD confirms the next speech, the held audio from `pad_s` before the speech's true start is sent
 first. The VAD confirms a start late, so `hold_s` must cover that delay plus the pad.
-A session starts holding: silence before the first speech isn't sent.
+A session starts holding: silence before the first speech isn't sent. The gate also keeps the
+speech spans it saw, for word times estimated from the audio.
 """
 
 import collections
@@ -12,6 +13,33 @@ from dataclasses import dataclass
 
 from ..audio.frames import Frame
 from ..audio.vad import SpeechEnded, SpeechStarted, VadEvent
+
+
+class SpeechLog:
+    """Speech spans in capture time, from the VAD's true edges; the newest may still be open."""
+
+    def __init__(self) -> None:
+        self._spans: collections.deque[tuple[float, float]] = collections.deque()
+        self.open_since: float | None = None
+
+    def started(self, at: float) -> None:
+        self.open_since = at
+
+    def ended(self, at: float) -> None:
+        if self.open_since is not None:
+            self._spans.append((self.open_since, at))
+            self.open_since = None
+
+    def between(self, start: float, end: float) -> list[tuple[float, float]]:
+        """The spans' parts inside [start, end]."""
+        spans = list(self._spans)
+        if self.open_since is not None:
+            spans.append((self.open_since, end))
+        return [(max(s, start), min(e, end)) for s, e in spans if e > start and s < end]
+
+    def forget_before(self, t: float) -> None:
+        while self._spans and self._spans[0][1] <= t:
+            self._spans.popleft()
 
 
 @dataclass(frozen=True)
@@ -28,6 +56,7 @@ class PauseGate:
         self.speaking = False
         self._held: collections.deque[Frame] = collections.deque()
         self._dropped = False
+        self.speech = SpeechLog()
 
     def push(self, frame: Frame, events: list[VadEvent]) -> list[Outgoing]:
         """Route a frame, given the VAD events its audio produced."""
@@ -43,8 +72,10 @@ class PauseGate:
                     placed = True
                 out += self._release(event.at - self.pad_s)
                 self.speaking = True
+                self.speech.started(event.at)
             elif isinstance(event, SpeechEnded) and self.speaking:
                 self.speaking = False
+                self.speech.ended(event.at)
         if not placed:
             if self.speaking:
                 out.append(Outgoing(frame, cut=False))

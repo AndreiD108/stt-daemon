@@ -43,7 +43,7 @@ src/                      package source
       elevenlabs.py       Scribe v2 Realtime: retrying open, padded short commits, in-order acks, pad-free word times
       elevenlabs_wire.py  EL language codes (639-3 → 639-1), error message → code, HTTP status → code with EL text
       elevenlabs_batch.py  file upload API: transcribe only, bytes as sent, one retry, 20–30 s speaker runs → commits
-      fake.py             FakeBackend for tests: scripted replies, partials, delays, failures, warnings, time limit
+      fake.py             FakeBackend for tests: scripted replies, partials, delays, failures, warnings, time limit, text only
       parakeet.py         local Parakeet TDT on sherpa-onnx: shared recognizer (load at open, decodes in turn, idle unload), token → word times
       install.py          `backend install parakeet`: download, SHA-256 check, unpack, bpe.vocab from tokens.txt
     server/               the socket side: connections, commands, mic and backend slots, event routing
@@ -67,11 +67,13 @@ src/                      package source
       tracks.py           Track: one source's VAD → pause gate → link, commit cadence (wall or audio time), audio loop
       upload.py           UploadSession: transcribe on a file backend; bytes kept, one upload at stop, no progress
       options.py          SessionOptions, MarkerRefused, start_point (where a started session takes its audio from)
-      recovery.py         Link: unanswered-audio log, in-order sends, rollover, reconnect, paced replay, suspend (int16 log) / resume
+      recovery.py         Link: unanswered-audio log, in-order sends, rollover, reconnect, paced replay, suspend / resume, times for text-only answers
+      link_log.py         the link's log items: audio (int16 while suspended), commit points
       segments.py         backend answers → segments: session times via timeline, markers placed, leftover markers
       moving.py           while_moving: wait bounded by no progress, paused time not counted
       events.py           what a session emits: started, partial, error, ended (+ evicted_by); segments from transcript
-      pause_gate.py       PauseGate: sends speech and short pauses, holds long ones back to a pre-speech pad
+      pause_gate.py       PauseGate: sends speech and short pauses, holds long ones back to a pre-speech pad; SpeechLog of spans
+      word_times.py       word times estimated for text-only answers: words over speech spans, split by syllables
       timeline.py         sent audio per connection ↔ capture time; backend seconds → session ms
       markers.py          pending markers; placement in word gaps or by character length
       transcript.py       Segment, committed segments, final text (with and without markers)
@@ -124,6 +126,7 @@ tests/
     test_speech_watch.py  daemon-wide VAD: events, speech starts by id and expiry, mic going quiet
     test_timeline.py      runs, cuts, edge snapping, jitter vs gaps, per-connection offsets
     test_pause_gate.py    held silence, pre-speech pad, short vs long pauses, flush
+    test_word_times.py    syllable counts, words over spans, sentence ends, non-Latin split, capture → chunk spans
     test_markers.py       word-gap placement, char fallback, empty text, queue
     test_transcript.py    final-text joining, empty segments, tracks as lines in start order
     test_track_segments.py  markers shared by two tracks: which segment takes each
@@ -152,6 +155,7 @@ tests/
     conftest.py           `daemon` fixture
     harness.py            in-process Server on a temp socket; test clients; fixture helpers
     test_daemon_audio.py      word times through a cut, several commits, rollover and replay
+    test_daemon_word_times.py  text-only backend: estimated times inside each phrase, markers, later commits
     test_daemon_clients.py    hello gate, welcome, errors, busy and eviction, observers, disconnects, reload
     test_daemon_lifecycle.py  socket file, shutdown, context store, marker times
     test_daemon_speech.py     VAD event routing, speech_id starts (edge, expiry, mic closed, eviction)
@@ -162,7 +166,7 @@ tests/
     test_daemon_sources.py    sources in welcome and events (opt-in), app sessions, unknown app, re-attach (also while suspended)
     test_daemon_aec.py        mic track on the echo-cancelled source; no module → plain mic, one aec_unavailable; pw-cli ending mid-session; built-in canceller keeps echo out
     test_cli_daemon.py        key set reloads the daemon; listen prints segments, exit codes
-    test_parakeet_daemon.py   `slow`, real model: commits at pauses, word times at speech edges, keyterms per stream, two tracks
+    test_parakeet_daemon.py   `slow`, real model: commits at pauses, word times at speech edges, estimate vs real times, keyterms, two tracks
   live/                   opt-in (`pytest -m live`): real mic, real backend key
     test_elevenlabs_live.py  fixture to real EL: word times at the speech edges (realtime and upload), bad key
     test_aec_live.py      fixture through the speakers: cleaned source ≥ 10 dB below the mic; off / module / built-in side by side while you read

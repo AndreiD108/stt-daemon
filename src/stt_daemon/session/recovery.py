@@ -5,7 +5,8 @@ A commit's answer drops the log up to that commit before the session hears of it
 holds exactly what no connection has answered yet. When a connection ends, the next one gets the
 whole log first, paced, then live audio; audio that comes meanwhile waits in the log. A
 connection rolls over before the backend's time limit: at a pause near the limit, or mid-speech
-when closer still. A suspended link has no connection; its log keeps growing, as int16.
+when closer still. A suspended link has no connection; its log keeps growing, as int16. An answer
+with text but no word times gets times estimated from the speech in the audio it covers.
 """
 
 import asyncio
@@ -13,11 +14,10 @@ import itertools
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import replace
 
 import numpy as np
 
-from ..audio.frames import PackedFrame
 from ..backends.base import (
     Backend,
     BackendEvent,
@@ -30,8 +30,10 @@ from ..backends.base import (
     Partial,
     trim_previous_text,
 )
-from .pause_gate import Outgoing
+from .link_log import Audio, Item, Kept, Point, size, unpacked
+from .pause_gate import Outgoing, SpeechLog
 from .timeline import Timeline
+from .word_times import with_times
 
 log = logging.getLogger(__name__)
 
@@ -50,31 +52,6 @@ REPLAY_RATE = 2.0
 SEND_TIMEOUT_S = 5.0
 OPEN_TIMEOUT_S = 15.0
 CONTEXT_CHARS = 200
-
-
-@dataclass(eq=False)
-class _Point:
-    final: bool
-
-
-@dataclass(frozen=True)
-class _Kept:
-    """Audio queued while suspended."""
-
-    frame: PackedFrame
-    cut: bool
-
-
-type _Audio = Outgoing | _Kept
-type _Item = _Audio | _Point
-
-
-def _size(item: _Audio) -> int:
-    return item.frame.pcm.size if isinstance(item, _Kept) else item.frame.samples.size
-
-
-def _unpacked(items: list[_Audio]) -> list[Outgoing]:
-    return [i if isinstance(i, Outgoing) else Outgoing(i.frame.unpack(), i.cut) for i in items]
 
 
 class _Fatal(Exception):
@@ -96,9 +73,11 @@ class Link:
         on_partial: Callable[[str], None],
         on_error: Callable[[str, str], None],
         on_fatal: Callable[[str, str], None],
+        speech: SpeechLog | None = None,
     ) -> None:
         """`on_committed(event, final)`: `final` when it answers the commit queued with `final`.
-        `on_error` gets non-fatal problems; `on_fatal` is called once, when the link gives up."""
+        `on_error` gets non-fatal problems; `on_fatal` is called once, when the link gives up.
+        `speech`: where the queued audio's speech is, for answers without word times."""
         self._backend = backend
         self._options = options
         self._timeline = timeline
@@ -107,11 +86,12 @@ class Link:
         self._on_partial = on_partial
         self._on_error = on_error
         self._on_fatal = on_fatal
+        self._speech = speech
         limit = backend.capabilities.max_connection_s
         self._rollover_s = None
         if limit is not None:
             self._rollover_s = (limit - SOFT_ROLLOVER_MARGIN_S, limit - HARD_ROLLOVER_MARGIN_S)
-        self._log: list[_Item] = []
+        self._log: list[Item] = []
         self._log_samples = 0
         self._sent = 0
         """Log items sent on the current connection; always a prefix of the log."""
@@ -154,7 +134,7 @@ class Link:
 
     def queue(self, out: Outgoing) -> None:
         if size := out.frame.samples.size:
-            self._log.append(_Kept(out.frame.pack(), out.cut) if self._suspended else out)
+            self._log.append(Kept(out.frame.pack(), out.cut) if self._suspended else out)
             self._log_samples += size
             self._wake.set()
 
@@ -231,10 +211,10 @@ class Link:
         if not self._log:
             return
         last = self._log[-1]
-        if isinstance(last, _Point):
+        if isinstance(last, Point):
             last.final = last.final or final
         else:
-            self._log.append(_Point(final))
+            self._log.append(Point(final))
             self._wake.set()
 
     def tick(self, *, speaking: bool) -> None:
@@ -250,7 +230,7 @@ class Link:
     async def settle(self) -> None:
         """Wait until every queued commit is answered, or the link has failed."""
         while self._alive and (
-            self._lost is not None or any(isinstance(item, _Point) for item in self._log)
+            self._lost is not None or any(isinstance(item, Point) for item in self._log)
         ):
             self._progress.clear()
             await self._progress.wait()
@@ -293,20 +273,20 @@ class Link:
         log.error("backend link failed", exc_info=error)
         self.fail("internal", f"the daemon failed while talking to the backend: {error}")
 
-    def _ready(self) -> tuple[list[Outgoing], _Point | None] | None:
+    def _ready(self) -> tuple[list[Outgoing], Point | None] | None:
         """Unsent audio up to a chunk or to the next commit, when there is that much."""
-        audio: list[_Audio] = []
+        audio: list[Audio] = []
         samples = 0
         for item in itertools.islice(self._log, self._sent, None):
-            if isinstance(item, _Point):
-                return _unpacked(audio), item
+            if isinstance(item, Point):
+                return unpacked(audio), item
             audio.append(item)
-            samples += _size(item)
+            samples += size(item)
             if samples >= self._chunk:
-                return _unpacked(audio), None
+                return unpacked(audio), None
         return None
 
-    async def _send(self, audio: list[Outgoing], point: _Point | None) -> None:
+    async def _send(self, audio: list[Outgoing], point: Point | None) -> None:
         conn = self._conn
         assert conn is not None
         if audio:
@@ -410,7 +390,7 @@ class Link:
 
     async def _swap(self) -> None:
         self.commit()
-        target = next((item for item in reversed(self._log) if isinstance(item, _Point)), None)
+        target = next((item for item in reversed(self._log) if isinstance(item, Point)), None)
         if target is not None:
             while self._lost is None and target in self._log[self._sent :]:
                 batch = self._ready()
@@ -469,16 +449,22 @@ class Link:
             self._uncertain.append(event)
             return
         final = False
+        offset = self._acked_samples
+        answered: list[Audio] = []
         if event.commit_id is not None:
             self._failures = 0
-            point = next((i for i, item in enumerate(self._log) if isinstance(item, _Point)), None)
+            point = next((i for i, item in enumerate(self._log) if isinstance(item, Point)), None)
             if point is not None and point < self._sent:
-                answered = self._log[point]
-                assert isinstance(answered, _Point)
-                final = answered.final
-                self._drop(point + 1)
+                last = self._log[point]
+                assert isinstance(last, Point)
+                final = last.final
+                answered = self._drop(point + 1)
         else:
-            self._drop_through(round(event.audio_end_s * self._timeline.sample_rate))
+            answered = self._drop_through(round(event.audio_end_s * self._timeline.sample_rate))
+        if self._speech is not None and answered:
+            frames = [out.frame for out in unpacked(answered)]
+            event = with_times(event, frames, self._speech.between, offset)
+            self._speech.forget_before(frames[-1].end)
         self._publish_uncertain()
         if event.text.strip():
             self._context = trim_previous_text(f"{self._context} {event.text}", CONTEXT_CHARS) or ""
@@ -494,22 +480,23 @@ class Link:
                 )
             self._on_committed(event, False)
 
-    def _drop(self, count: int) -> None:
-        for item in self._log[:count]:
-            if isinstance(item, _Point):
-                continue
-            self._acked_samples += _size(item)
-            self._log_samples -= _size(item)
+    def _drop(self, count: int) -> list[Audio]:
+        """Drop the first `count` log items; returns their audio."""
+        audio = [item for item in self._log[:count] if not isinstance(item, Point)]
+        for item in audio:
+            self._acked_samples += size(item)
+            self._log_samples -= size(item)
         del self._log[:count]
         self._sent -= count
+        return audio
 
-    def _drop_through(self, offset: int) -> None:
+    def _drop_through(self, offset: int) -> list[Audio]:
         """Drop sent audio a provider commit covered, up to the first unanswered commit."""
         count = 0
         acked = self._acked_samples
         for item in self._log[: self._sent]:
-            if isinstance(item, _Point) or acked + _size(item) > offset:
+            if isinstance(item, Point) or acked + size(item) > offset:
                 break
-            acked += _size(item)
+            acked += size(item)
             count += 1
-        self._drop(count)
+        return self._drop(count)
