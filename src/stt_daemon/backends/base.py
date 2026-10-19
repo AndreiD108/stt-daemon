@@ -79,15 +79,30 @@ type BackendEvent = Partial | Committed | Failed | Closed
 type EventSink = Callable[[BackendEvent], None]
 
 
+type PauseSteps = tuple[tuple[float, float], ...]
+
+PAUSE_STEPS: PauseSteps = ((0, 3.5), (8, 1.0), (14, 0.8), (19, 0.6), (23, 0.3), (27, 0.15))
+"""Long pauses early so a chunk keeps its sentence when the speaker stops to think, shorter ones
+as the chunk grows toward the cap."""
+
+
 @dataclass(frozen=True)
 class CommitPolicy:
-    interval_s: float | None = None
-    """Commit once this much wall time has passed since the last commit, if speech was sent."""
-    check_every_s: float | None = None
-    """How often to check `interval_s`; it can cut mid-speech."""
-    at_pauses: bool = False
+    pause_steps: PauseSteps = ()
+    """(sent_s, pause_s) by rising `sent_s`: once `sent_s` of audio was sent since the last
+    commit, a pause of `pause_s` commits, if speech was sent. Silence the session cut isn't
+    sent, so it doesn't count."""
     max_chunk_s: float | None = None
     """Commit once this much audio was sent since the last commit, pause or not."""
+
+    def pause_for(self, sent_s: float) -> float | None:
+        """The pause that commits after `sent_s`; None: pauses don't commit yet."""
+        pause = None
+        for since_s, pause_s in self.pause_steps:
+            if sent_s < since_s:
+                break
+            pause = pause_s
+        return pause
 
 
 @dataclass(frozen=True)

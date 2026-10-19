@@ -35,6 +35,15 @@ def test_times_at_a_cut_snap_to_the_side_of_the_word() -> None:
     assert tl.to_capture(1, 2.0, "start") == pytest.approx(14.0)
 
 
+def test_a_word_across_a_cut_goes_whole_into_the_side_holding_more_of_it() -> None:
+    tl = Timeline(origin=10.0)
+    tl.sent(1, 10.0, RATE, cut=False)  # sent 0-1 s ← captured 10-11 s
+    tl.sent(1, 13.0, RATE, cut=True)  # sent 1-2 s ← captured 13-14 s
+    assert tl.word_span(1, 0.7, 1.5) == (pytest.approx(13.0), pytest.approx(13.5))
+    assert tl.word_span(1, 0.5, 1.1) == (pytest.approx(10.5), pytest.approx(11.0))
+    assert tl.word_span(1, 0.2, 0.4) == (pytest.approx(10.2), pytest.approx(10.4))
+
+
 def test_small_jitter_continues_a_run_but_a_capture_gap_starts_one() -> None:
     tl = Timeline(origin=0.0)
     tl.sent(1, 0.0, RATE, cut=False)

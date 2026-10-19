@@ -22,7 +22,7 @@ from stt_daemon.config import AudioConfig, Config
 from stt_daemon.server.sources import PwDumpScan
 
 FAKE_PW_RECORD = str(Path(__file__).parents[1] / "fake_pw_record.py")
-PAUSES = replace(FAKE_CAPABILITIES, commit_policy=CommitPolicy(at_pauses=True))
+PAUSES = replace(FAKE_CAPABILITIES, commit_policy=CommitPolicy(pause_steps=((0, 0.6),)))
 MIC_NOISE_DB = -60.0
 
 

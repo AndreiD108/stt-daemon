@@ -4,8 +4,7 @@ Everything runs on the event loop. Each track reads its capture attachment and s
 commits to its own `Link`, which survives the backend's connections ending; segments of all
 tracks go into one transcript.
 
-A `transcribe` session reads a `ByteStreamCapture` on audio time: it commits at pauses and at a
-chunk cap instead of on a wall-clock cadence, and its `stop` means the end of input.
+A `transcribe` session reads a `ByteStreamCapture`, and its `stop` means the end of input.
 
 A `system` session has a `system` track (a `SystemCapture`) and, optionally, a `mic` track on
 the shared mic or its echo-cancelled copy. A track whose capture stops goes silent and is
@@ -100,16 +99,13 @@ class Session:
         """A link that gave up before `session_started`: the start fails with it."""
         self._finishing = False
         self._ended: asyncio.Future[SessionEnded] = asyncio.get_running_loop().create_future()
-        policy = backend.capabilities.commit_policy
-        at_pauses, chunk_cap_s = policy.at_pauses, policy.max_chunk_s
         self._stream: ByteStreamCapture | None = None
         self._last_progress = 0.0
         if kind == "transcribe":
             assert isinstance(capture, ByteStreamCapture)
             self._stream = capture
             capture.on_failed = lambda message: self._fail("invalid_request", message)
-            at_pauses = True
-            chunk_cap_s = policy.max_chunk_s or policy.interval_s
+        chunk_cap_s = backend.capabilities.commit_policy.max_chunk_s
         self._max_backlog_s = max(MIN_BACKLOG_S, 2 * (chunk_cap_s or 0))
         sources: list[tuple[str | None, CaptureSource]] = [
             ("system" if kind == "system" else None, capture)
@@ -135,9 +131,6 @@ class Session:
                     capture=source,
                     backend=backend,
                     segments=segments,
-                    at_pauses=at_pauses,
-                    chunk_cap_s=chunk_cap_s,
-                    wall_commits=self._stream is None,
                 )
             )
             if isinstance(source, SystemCapture | EchoCancelledMic):

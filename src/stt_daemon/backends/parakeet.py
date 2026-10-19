@@ -17,6 +17,7 @@ from ..audio.frames import Samples
 from ..config import Config, ParakeetConfig, data_dir
 from ..credentials import Credentials
 from .base import (
+    PAUSE_STEPS,
     SAMPLE_RATE,
     Backend,
     BackendUnavailable,
@@ -47,7 +48,7 @@ CAPABILITIES = Capabilities(
     partials=False,
     hints=frozenset({"keyterms"}),
     max_connection_s=None,
-    commit_policy=CommitPolicy(at_pauses=True, max_chunk_s=30.0),
+    commit_policy=CommitPolicy(pause_steps=PAUSE_STEPS, max_chunk_s=30.0),
     paced_replay=False,
 )
 
@@ -255,7 +256,7 @@ class ParakeetBackend(Backend):
         self._config = config
         self._model = model
         self._engine = engine
-        policy = CommitPolicy(at_pauses=True, max_chunk_s=config.max_chunk_seconds)
+        policy = CommitPolicy(pause_steps=PAUSE_STEPS, max_chunk_s=config.max_chunk_seconds)
         self.capabilities = replace(CAPABILITIES, commit_policy=policy)
 
     def __repr__(self) -> str:

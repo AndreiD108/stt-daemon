@@ -7,6 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from stt_daemon.audio.wav_capture import WavCapture, read_wav
 from stt_daemon.backends.base import CommitPolicy, OpenOptions
@@ -21,10 +22,8 @@ FIXTURE = Path(__file__).parents[1] / "fixtures" / "two_phrases.wav"
 RATE = 16000
 
 
-def fake(
-    replies: list[FakeReply | str], interval_s: float | None = None, every_s: float = 0.1
-) -> FakeBackend:
-    policy = CommitPolicy(interval_s=interval_s, check_every_s=every_s)
+def fake(replies: list[FakeReply | str], chunk_s: float | None = None) -> FakeBackend:
+    policy = CommitPolicy(max_chunk_s=chunk_s)
     return FakeBackend(replies, capabilities=replace(FAKE_CAPABILITIES, commit_policy=policy))
 
 
@@ -96,7 +95,7 @@ async def test_several_commits_on_one_connection() -> None:
         "echo",
         "foxtrot",
     ]
-    backend = fake(replies, interval_s=1.5)
+    backend = fake(replies, chunk_s=1.5)
     capture, session, events = await run(backend, partials=True)
     try:
         await asyncio.to_thread(capture.wait_idle, 15)
@@ -119,7 +118,7 @@ async def test_several_commits_on_one_connection() -> None:
 
 
 async def test_marker_during_a_commit_goes_by_its_time() -> None:
-    backend = fake([FakeReply("first", delay_s=1.0), "second"], interval_s=2.0)
+    backend = fake([FakeReply("first", delay_s=1.0), "second"], chunk_s=2.0)
     capture, session, events = await run(backend)
     try:
         while not backend.connections[0].commit_ids:
@@ -158,7 +157,7 @@ async def test_stop_waits_a_bounded_time_and_keeps_leftover_markers() -> None:
 
 
 async def test_cancel_keeps_committed_text_and_drops_the_rest() -> None:
-    backend = fake(["kept", FakeReply("dropped", delay_s=2.0)], interval_s=1.5)
+    backend = fake(["kept", FakeReply("dropped", delay_s=2.0)], chunk_s=1.5)
     capture, session, events = await run(backend)
     try:
         while not segments(events):
@@ -191,3 +190,40 @@ async def test_a_chunk_without_a_pause_commits_at_the_cap() -> None:
     for start, end in spans[:-1]:
         assert 1.0 <= end - start < 1.1, spans
     assert spans[-1][1] - spans[-1][0] < 1.1
+
+
+@pytest.mark.parametrize(("pause_from_s", "commits_at_pause"), [(2.0, True), (4.0, False)])
+async def test_the_pause_that_commits_depends_on_the_audio_sent_not_the_time_passed(
+    pause_from_s: float, commits_at_pause: bool
+) -> None:
+    # The fixture's 2 s pause comes after ~3.4 s of sent audio and ~4.5 s of session time.
+    policy = CommitPolicy(pause_steps=((0, 3.5), (pause_from_s, 1.0)))
+    backend = FakeBackend(["a", "b"], capabilities=replace(FAKE_CAPABILITIES, commit_policy=policy))
+    capture, session, _ = await run(backend)
+    try:
+        await asyncio.to_thread(capture.wait_idle, 15)
+        await session.stop()
+    finally:
+        await capture.stop()
+    first_end = backend.connections[0].commit_spans[0][1]
+    if commits_at_pause:
+        assert first_end == pytest.approx(3.44, abs=0.25)
+    else:
+        assert first_end > 6  # both phrases
+
+
+async def test_the_pause_tail_after_a_short_pause_commit_does_not_commit_on_its_own() -> None:
+    # A 0.3 s pause commits before the gate closes at 0.6 s; the silence sent meanwhile is no
+    # speech, so it waits for the next phrase instead of becoming a chunk of its own.
+    policy = CommitPolicy(pause_steps=((0, 0.3),))
+    backend = FakeBackend(
+        ["a", "b", "c"], capabilities=replace(FAKE_CAPABILITIES, commit_policy=policy)
+    )
+    capture, session, _ = await run(backend)
+    try:
+        await asyncio.to_thread(capture.wait_idle, 15)
+        await session.stop()
+    finally:
+        await capture.stop()
+    spans = backend.connections[0].commit_spans
+    assert len(spans) == 3, spans  # each phrase, then the held audio at stop

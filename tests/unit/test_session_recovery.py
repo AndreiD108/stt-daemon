@@ -67,7 +67,7 @@ async def test_markers_survive_a_replay_once() -> None:
         "second",
         "third",
     ]
-    backend = fake(replies, interval_s=2.0)
+    backend = fake(replies, chunk_s=2.0)
     capture, session, events = await run(backend)
     try:
         while not backend.connections[0].commit_ids:
@@ -90,7 +90,7 @@ async def test_markers_survive_a_replay_once() -> None:
 
 async def test_exhausted_recovery_ends_with_the_committed_text() -> None:
     fail = FakeReply(fail=("network", True))
-    backend = fake(["kept", fail, fail, fail, fail], interval_s=1.5)
+    backend = fake(["kept", fail, fail, fail, fail], chunk_s=1.5)
     capture, session, events = await run(backend)
     try:
         ended = await asyncio.wait_for(session.wait_ended(), 15)
@@ -109,10 +109,10 @@ async def test_exhausted_recovery_ends_with_the_committed_text() -> None:
 async def test_stop_during_replacement_open_is_bounded(
     reason: Literal["stopped", "evicted"],
 ) -> None:
-    backend = fake(["kept"], interval_s=1.5)
+    backend = fake(["kept"], chunk_s=1.5)
     capture, session, events = await run(backend)
     try:
-        await play_until(session, 2.2)
+        await play_until(session, 2.8)
         assert segments(events)[0].text == "kept"
         backend.open_delay_s = 10
         backend.fail()

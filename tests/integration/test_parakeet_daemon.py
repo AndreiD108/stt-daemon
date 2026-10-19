@@ -56,10 +56,22 @@ async def _session(
     assert welcome["data"]["backends"][0]["name"] == "parakeet"
     started = await client.request("start_session", {"word_timestamps": True, "keyterms": keyterms})
     assert started["type"] == "session_started", started
-    await client.event("segment", timeout=25.0, index=2)
+    # The 2.0 and 2.4 s pauses are too short to commit early in a chunk; the silence after
+    # the file commits the third phrase.
+    await client.event("segment", timeout=30.0, index=1)
     stopped = await client.request("stop_session")
     assert stopped["type"] == "session_ended", stopped
     return [m["data"] for m in client.of_type("segment")], stopped["data"]
+
+
+def _phrase_starts(spoken: list[Msg]) -> list[Msg]:
+    """Each segment's first word and every word after one that ends a sentence."""
+    return [
+        word
+        for segment in spoken
+        for before, word in zip([None, *segment["words"]], segment["words"], strict=False)
+        if before is None or before["text"].endswith(".")
+    ]
 
 
 async def test_segments_commit_at_pauses_with_word_times(daemon: Harness) -> None:
@@ -67,16 +79,17 @@ async def test_segments_commit_at_pauses_with_word_times(daemon: Harness) -> Non
     segments, ended = await _session(daemon, [], loaded)
     assert len(loaded) == 1
     texts = [s["text"] for s in segments if s["text"]]
-    assert len(texts) == 3, texts
+    assert len(texts) == 2, texts
     assert "tablet" in texts[0]
-    assert "pen marks" in texts[1]
-    assert "routes the mic" in texts[2]
+    assert "pen marks" in texts[0]
+    assert "routes the mic" in texts[1]
     assert ended["final_text"].lower().startswith("restart the")
     spoken = [s for s in segments if s["text"]]
-    for segment, edge_ms in zip(spoken, PHRASE_STARTS_MS, strict=True):
+    for word, edge_ms in zip(_phrase_starts(spoken), PHRASE_STARTS_MS, strict=True):
+        assert abs(word["start_ms"] - edge_ms) <= 200, (word, edge_ms)
+    for segment in spoken:
         words = segment["words"]
         assert " ".join(w["text"] for w in words) == segment["text"]
-        assert abs(words[0]["start_ms"] - edge_ms) <= 200, (words[0], edge_ms)
         assert all(a["end_ms"] <= b["start_ms"] + 1 for a, b in itertools.pairwise(words))
         assert segment["start_ms"] <= words[0]["start_ms"]
         assert words[-1]["end_ms"] <= segment["end_ms"]
@@ -114,9 +127,9 @@ async def test_keyterms_go_in_per_stream(daemon: Harness) -> None:
     segments, ended = await _session(daemon, KEYTERMS, loaded)
     assert len(loaded) == 1
     texts = [s["text"] for s in segments if s["text"]]
-    assert len(texts) == 3, texts
-    assert "pen marks" in texts[1]
-    assert "routes the mic" in texts[2]
+    assert len(texts) == 2, texts
+    assert "pen marks" in texts[0].lower()
+    assert "routes the mic" in texts[1]
     assert ended["final_text"]
 
 
@@ -133,11 +146,11 @@ async def test_a_file_through_transcribe_gets_word_times_in_file_time(daemon: Ha
     stopped = await client.request("stop_session", timeout=30.0)
     assert stopped["data"]["reason"] == "stopped", stopped
     spoken = [m["data"] for m in client.of_type("segment") if m["data"]["text"]]
-    assert len(spoken) == 3, [s["text"] for s in spoken]
-    assert "pen marks" in spoken[1]["text"]
-    assert "routes the mic" in spoken[2]["text"]
-    for segment, edge_ms in zip(spoken, PHRASE_STARTS_MS, strict=True):
-        assert abs(segment["words"][0]["start_ms"] - edge_ms) <= 200, (segment["words"][0], edge_ms)
+    assert len(spoken) == 2, [s["text"] for s in spoken]
+    assert "pen marks" in spoken[0]["text"]
+    assert "routes the mic" in spoken[1]["text"]
+    for word, edge_ms in zip(_phrase_starts(spoken), PHRASE_STARTS_MS, strict=True):
+        assert abs(word["start_ms"] - edge_ms) <= 200, (word, edge_ms)
 
 
 async def test_a_system_session_decodes_both_tracks_on_one_model(daemon: Harness) -> None:
@@ -170,11 +183,12 @@ async def test_a_system_session_decodes_both_tracks_on_one_model(daemon: Harness
             if m["data"]["track"] == track and m["data"]["text"]
         ]
 
-    await client.wait(lambda _m: len(spoken("system")) == 2 and len(spoken("mic")) == 2, 25.0)
+    await client.wait(lambda _m: len(spoken("system")) == 1 and len(spoken("mic")) == 2, 30.0)
     stopped = await client.request("stop_session")
     assert stopped["data"]["reason"] == "stopped", stopped
     assert len(loaded) == 1
     assert "tablet" in spoken("mic")[0]["text"]
-    assert "pen marks" in spoken("mic")[1]["text"]
+    assert "pen marks" in spoken("mic")[0]["text"]
+    assert "routes the mic" in spoken("mic")[1]["text"]
     lines = stopped["data"]["final_text"].splitlines()
     assert {line.split(" ", 1)[0] for line in lines} == {"[system]", "[mic]"}

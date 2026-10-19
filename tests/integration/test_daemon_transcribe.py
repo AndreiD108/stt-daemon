@@ -48,7 +48,7 @@ def segments(client: TestClient) -> list[Msg]:
 async def test_a_wav_file_in_chunks_commits_at_pauses_with_word_times_in_file_time(
     daemon: Harness,
 ) -> None:
-    backend = fake(["one two", "three four"])
+    backend = fake(["one two", "three four"], pause_s=0.6)
     await daemon.start(backend)
     client, _ = await daemon.connect("Scribbly")
     started = await client.request("transcribe", {"word_timestamps": True})
@@ -85,7 +85,7 @@ async def test_raw_pcm_at_16k_mono_needs_no_ffmpeg(
     daemon: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(server_starts, "check_tool", missing)
-    await daemon.start(fake(["one two", "three four"]))
+    await daemon.start(fake(["one two", "three four"], pause_s=0.6))
     client, _ = await daemon.connect("Scribbly")
     started = await client.request("transcribe", {"pcm": PCM_16K})
     assert started["type"] == "session_started", started
@@ -174,7 +174,7 @@ async def test_input_ffmpeg_cannot_read_ends_the_session_with_its_message(
 
 
 async def test_markers_land_by_file_time(daemon: Harness) -> None:
-    await daemon.start(fake(["one two", "three four"]))
+    await daemon.start(fake(["one two", "three four"], pause_s=0.6))
     client, _ = await daemon.connect("Scribbly")
     started = await client.request("transcribe", {"pcm": PCM_16K})
     marker_at = started["data"]["started_at"] + 5000  # in the pause between the phrases

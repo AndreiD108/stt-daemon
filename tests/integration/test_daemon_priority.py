@@ -33,7 +33,7 @@ def segments(client: TestClient) -> list[Msg]:
 async def transcribe(daemon: Harness, *, dictation: bool) -> TestClient:
     """The fixture through `transcribe`, split at `SPLIT_S`; with `dictation`, a mic session
     takes the backend's one slot between the halves and ends only after the stop was sent."""
-    backend = fake(["one two", "three four"])
+    backend = fake(["one two", "three four"], pause_s=0.6)
     backend.capacity = 1
     await daemon.start(backend)
     scribbly, _ = await daemon.connect("Scribbly")
@@ -99,7 +99,7 @@ async def test_a_transcribe_blocked_on_writes_while_suspended_stalls_no_one(
 ) -> None:
     monkeypatch.setattr(session_module, "MIN_BACKLOG_S", 0.5)
     monkeypatch.setattr(session_module, "STALL_S", 0.5)
-    backend = fake(interval_s=0.25)  # a commit cap under half the backlog limit, as real ones
+    backend = fake(chunk_s=0.25)  # a commit cap under half the backlog limit, as real ones
     backend.capacity = 1
     await daemon.start(backend)
     scribbly, _ = await daemon.connect("Scribbly")
@@ -124,7 +124,7 @@ async def test_a_client_gone_while_its_suspended_transcribe_waits_on_input_is_dr
     daemon: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(session_module, "MIN_BACKLOG_S", 0.5)
-    backend = fake(interval_s=0.25)
+    backend = fake(chunk_s=0.25)
     backend.capacity = 1
     await daemon.start(backend)
     watch, _ = await daemon.connect("Watch", observe_all=True)

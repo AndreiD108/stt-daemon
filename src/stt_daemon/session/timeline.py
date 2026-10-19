@@ -71,6 +71,30 @@ class Timeline:
         run = runs[i]
         return run.capture_start + (offset - run.offset) / self.sample_rate
 
+    def word_span(self, connection_id: int, start_s: float, end_s: float) -> tuple[float, float]:
+        """Capture times of a word's backend start and end. A word that crosses a cut goes whole
+        into the run holding more of it: decoders can start a word early, before the cut."""
+        runs = self._runs.get(connection_id)
+        if not runs:
+            return self.origin, self.origin
+        last = runs[-1].end_offset
+        a = min(max(round(start_s * self.sample_rate), 0), last)
+        b = min(max(round(end_s * self.sample_rate), a), last)
+        starts = [r.offset for r in runs]
+        first = max(bisect.bisect_right(starts, a) - 1, 0)
+        final = max(bisect.bisect_left(starts, b) - 1, first)
+        i = max(
+            range(first, final + 1),
+            key=lambda k: min(b, runs[k].end_offset) - max(a, runs[k].offset),
+        )
+        run = runs[i]
+        a, b = max(a, run.offset), min(b, run.end_offset)
+        rate = self.sample_rate
+        return (
+            run.capture_start + (a - run.offset) / rate,
+            run.capture_start + (max(a, b) - run.offset) / rate,
+        )
+
     def to_ms(self, t: float) -> int:
         """Session ms of a monotonic time; never negative."""
         return max(round((t - self.origin) * 1000), 0)

@@ -216,11 +216,10 @@ Checks run in this order: field types (`bad_request`), this client's session (`s
 the backend, language and features, ffmpeg (`tool_unavailable`), then room on the backend
 (`busy`, `full_slot: "backend"`). A full backend refuses the start; the daemon does not queue it.
 
-The session commits at each pause the VAD finds in the audio and after the backend's chunk cap
-of audio with no pause (25 s for ElevenLabs, `backends.<name>.max_chunk_seconds` for Parakeet
-and plugins); it has no wall-clock commits. It sends `progress` events as it goes. It takes no more
-audio while 60 s of it (or twice the chunk cap, if more) waits for the backend's text; a backend
-that then answers nothing for 60 s ends the session with a fatal `backend_error`.
+The session commits as a live one does, by audio sent (see [`segment`](#segment)). It sends
+`progress` events as it goes. It takes no more audio while 60 s of it (or twice the chunk cap,
+if more) waits for the backend's text; a backend that then answers nothing for 60 s ends the
+session with a fatal `backend_error`.
 
 While suspended for a dictation, the session goes on taking in audio up to that 60 s limit, then
 stops like any session that is behind: the daemon stops reading the connection, so commands sent
@@ -631,14 +630,25 @@ session, `track` names the track, and a partial replaces only that track's previ
 - `speaker` (on the segment and on each word, as `"speaker_0"`, `"speaker_1"`, …): only in a
   session with `diarize: true`. Segments split where the speaker changes, so a segment has one;
   missing when the backend named none.
-- When segments commit is up to the backend. Timed commits are checked every 5 s and need speech
-  sent since the last commit, so they can cut mid-speech. ElevenLabs: 25 s after the last commit
-  (ElevenLabs advises 20–30 s), before each connection rollover (about every 13 minutes), and at
-  stop. Parakeet, which transcribes after the fact: at each pause the VAD reports, once 30 s of
-  audio was sent with no pause (config `backends.parakeet.max_chunk_seconds`), and at stop.
-  Parakeet sessions share one model and take turns to transcribe, so a commit can wait for
-  another session's. A `transcribe` session commits by audio time instead; see
-  [`transcribe`](#transcribe).
+- When segments commit depends on how much audio was sent since the last commit (silence the
+  session cut is not sent, so it doesn't count). Early in a segment only a long pause commits, so
+  a segment keeps its sentence when the speaker stops to think; as it grows, shorter pauses do.
+  Pauses come from the VAD and need speech sent since the last commit.
+
+  | Audio sent | Pause that commits |
+  |---|---|
+  | 0–8 s | 3.5 s |
+  | 8–14 s | 1 s (ElevenLabs: 2 s) |
+  | 14–19 s | 0.8 s |
+  | 19–23 s | 0.6 s |
+  | 23–27 s | 0.3 s |
+  | 27–30 s | 0.15 s (not ElevenLabs) |
+
+  With no such pause, a segment commits at 25 s of audio for ElevenLabs (it commits on its own
+  at about 36 s) and at `backends.<name>.max_chunk_seconds` (default 30) for Parakeet and plugins.
+  Every session also commits at stop, and ElevenLabs before each connection rollover (about every
+  13 minutes). Parakeet sessions share one model and take turns to transcribe, so a commit can
+  wait for another session's.
 
 ### `progress`
 

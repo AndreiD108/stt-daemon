@@ -21,7 +21,7 @@ FAKE_PW_RECORD = os.path.join(os.path.dirname(__file__), "..", "fake_pw_record.p
 FAKE_AUDIOTEE = Path(__file__).parents[1] / "fake_audiotee.py"
 MIC_DELAY_S = 0.5
 """The mic plays the fixture this long after the system track, so their phrases alternate."""
-PAUSES = replace(FAKE_CAPABILITIES, commit_policy=CommitPolicy(at_pauses=True))
+PAUSES = replace(FAKE_CAPABILITIES, commit_policy=CommitPolicy(pause_steps=((0, 0.6),)))
 
 
 def at_pauses(replies: list[FakeReply | str] | None = None) -> FakeBackend:

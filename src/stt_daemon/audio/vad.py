@@ -103,6 +103,15 @@ class StreamingVAD:
         self._run_start: int | None = None
         self._low_run_start: int | None = None
         self._silence_start: int | None = None
+        self._quiet_since: int | None = None
+
+    @property
+    def pause_s(self) -> float:
+        """Silence since the last speech, past its `SpeechEnded` too; 0 while speaking or before
+        any speech. A run too short to start speech doesn't end the pause."""
+        if self._quiet_since is None:
+            return 0.0
+        return (self._next_sample - self._quiet_since) / self.sample_rate
 
     @property
     def start_delay_s(self) -> float:
@@ -157,6 +166,7 @@ class StreamingVAD:
         self._anchors.clear()
         self._last_end = None
         self._speech_id = self._run_start = self._low_run_start = self._silence_start = None
+        self._quiet_since = None
         return events
 
     def _step(self, speech: bool, low: bool) -> VadEvent | None:
@@ -181,13 +191,13 @@ class StreamingVAD:
                 return None
             self._speech_id = next(self._ids)
             event = SpeechStarted(self._speech_id, self._time_of(self._start_edge(self._run_start)))
-            self._run_start = self._silence_start = None
+            self._run_start = self._silence_start = self._quiet_since = None
             return event
         if speech:
-            self._silence_start = None
+            self._silence_start = self._quiet_since = None
             return None
         if self._silence_start is None:
-            self._silence_start = flag_edge
+            self._silence_start = self._quiet_since = flag_edge
         if self._next_sample - self._silence_start < self._min_silence:
             return None
         event = SpeechEnded(self._speech_id, self._time_of(self._silence_start))

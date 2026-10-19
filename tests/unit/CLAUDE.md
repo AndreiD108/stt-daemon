@@ -32,7 +32,7 @@ test_aec_pipewire.py  echo-cancel module via a pw-cli stand-in: node wait, load 
 test_stream_capture.py  byte stream with a stand-in decoder: order, audio-time stamps, failures, backpressure
 test_vad.py           edges on the fixture vs chunk size and window phase, delays, ids, gap reset
 test_speech_watch.py  daemon-wide VAD: events, speech starts by id and expiry, mic going quiet
-test_timeline.py      runs, cuts, edge snapping, jitter vs gaps, per-connection offsets
+test_timeline.py      runs, cuts, edge snapping, words across a cut, jitter vs gaps, per-connection offsets
 test_pause_gate.py    held silence, pre-speech pad, short vs long pauses, flush
 test_word_times.py    syllable counts, words over spans, sentence ends, non-Latin split, capture → chunk spans
 test_markers.py       word-gap placement, char fallback, empty text, queue

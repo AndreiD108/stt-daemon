@@ -20,6 +20,7 @@ from .. import plugin
 from ..config import DEFAULT_MAX_SESSIONS, Config, config_dir
 from ..credentials import Credentials
 from .base import (
+    PAUSE_STEPS,
     Backend,
     BackendUnavailable,
     Capabilities,
@@ -222,7 +223,7 @@ class PluginBackend(Backend):
             partials=False,
             hints=frozenset(h for h, on in hints.items() if on),
             max_connection_s=None,
-            commit_policy=CommitPolicy(at_pauses=True, max_chunk_s=bounds.max_chunk_s),
+            commit_policy=CommitPolicy(pause_steps=PAUSE_STEPS, max_chunk_s=bounds.max_chunk_s),
             paced_replay=False,
             diarize=caps.diarize,
         )

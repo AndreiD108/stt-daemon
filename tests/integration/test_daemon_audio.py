@@ -24,11 +24,11 @@ async def run_fixture(
     daemon: Harness,
     replies: list[FakeReply | str],
     *,
-    interval_s: float | None = None,
+    chunk_s: float | None = None,
     max_connection_s: float | None = None,
 ) -> tuple[FakeBackend, WavCapture, TestClient]:
     """A word-timed session from the fixture's first sample, while the fixture plays."""
-    backend = fake(replies, interval_s=interval_s)
+    backend = fake(replies, chunk_s=chunk_s)
     backend.capabilities = replace(backend.capabilities, max_connection_s=max_connection_s)
     capture = WavCapture(FIXTURE)
     await daemon.start(backend, capture=capture)
@@ -61,7 +61,7 @@ async def test_word_times_map_back_through_a_pause_cut(daemon: Harness) -> None:
 
 async def test_several_commits_on_one_connection(daemon: Harness) -> None:
     replies: list[FakeReply | str] = [f"w{i}a w{i}b" for i in range(8)]
-    backend, capture, client = await run_fixture(daemon, replies, interval_s=1.5)
+    backend, capture, client = await run_fixture(daemon, replies, chunk_s=1.5)
     await asyncio.to_thread(capture.wait_idle, 15)
     ended = await client.request("stop_session")
     [conn] = backend.connections

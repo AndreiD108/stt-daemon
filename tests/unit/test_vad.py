@@ -115,3 +115,17 @@ def test_long_speech_keeps_little_timing_history(speech: Samples) -> None:
     events = _feed(vad, np.tile(phrase, 4), 80)
     assert [type(e) for e in events] == [SpeechStarted]
     assert len(vad._anchors) < 50  # pyright: ignore[reportPrivateUsage]
+
+
+def test_the_pause_runs_past_the_speech_end_until_the_next_speech(speech: Samples) -> None:
+    first_end = int(SPEECH[0][1] * RATE)
+    burst = speech[int(SPEECH[1][0] * RATE) :][: RATE // 10]
+    silence = np.zeros(RATE, np.float32)
+    audio = np.concatenate([speech[:first_end], silence, burst, silence])
+    vad = StreamingVAD(min_speech_ms=250)
+    _feed(vad, audio, 512)
+    assert vad.pause_s == pytest.approx(2.1, abs=END_TOLERANCE_S)
+    _feed(vad, speech[first_end:], 512, T0 + audio.size / RATE)
+    assert vad.speech_id is None
+    _feed(vad, speech[int(SPEECH[1][0] * RATE) :][: RATE // 2], 512, T0 + 100)
+    assert vad.pause_s == 0

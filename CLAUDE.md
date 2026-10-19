@@ -68,7 +68,7 @@ src/                      package source
     session/              one session: capture → VAD → pause cutting → backend → segments
       __init__.py         empty package marker
       session.py          Session: one or two tracks; start, stop (bounded) / cancel / error end, suspend / resume, capture loss
-      tracks.py           Track: one source's VAD → pause gate → link, commit cadence (wall or audio time), audio loop
+      tracks.py           Track: one source's VAD → pause gate → link, commits by pause length and audio sent, audio loop
       upload.py           UploadSession: transcribe on a file backend; bytes kept, one upload at stop, no progress
       options.py          SessionOptions, MarkerRefused, start_point (where a started session takes its audio from)
       recovery.py         Link: unanswered-audio log, in-order sends, rollover, reconnect, paced replay, suspend / resume, text-only word times

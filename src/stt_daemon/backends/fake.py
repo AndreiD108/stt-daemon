@@ -35,7 +35,7 @@ FAKE_CAPABILITIES = Capabilities(
     partials=True,
     hints=frozenset({"keyterms", "previous_text"}),
     max_connection_s=None,
-    commit_policy=CommitPolicy(interval_s=25.0, check_every_s=5.0),
+    commit_policy=CommitPolicy(),
 )
 
 

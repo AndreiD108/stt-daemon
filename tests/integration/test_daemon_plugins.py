@@ -59,7 +59,8 @@ def _text_segments(client: TestClient) -> list[Msg]:
 async def test_a_dictation_on_the_plugin_gets_estimated_word_times_and_a_marker(
     daemon: Harness, api: FakeBatch
 ) -> None:
-    _answer(api, *(text for _, text in PHRASES))
+    # The 2 s pause between the phrases is under the 3.5 s that commits early in a chunk.
+    _answer(api, " ".join(text for _, text in PHRASES))
     capture = WavCapture(FIXTURE)
     setup = _setup(_config(api), Credentials(file_keys={"openai": "sk-test"}))
     await daemon.start(capture=capture, setup=setup)
@@ -75,14 +76,17 @@ async def test_a_dictation_on_the_plugin_gets_estimated_word_times_and_a_marker(
     ended = await client.request("stop_session")
     assert ended["type"] == "session_ended", ended
 
-    segments = _text_segments(client)
-    assert [s["text"].replace(" ⟦A⟧", "") for s in segments] == [text for _, text in PHRASES]
-    for segment, ((start_ms, end_ms), _) in zip(segments, PHRASES, strict=True):
-        words = segment["words"]
-        assert abs(words[0]["start_ms"] - start_ms) <= EDGE_MS, words[0]
-        assert abs(words[-1]["end_ms"] - end_ms) <= EDGE_MS, words[-1]
-    [marker] = segments[1]["markers"]
-    assert 0 < marker["after_word"] < len(segments[1]["words"]) - 1
+    [segment] = _text_segments(client)
+    assert segment["text"].replace(" ⟦A⟧", "") == " ".join(text for _, text in PHRASES)
+    words = segment["words"]
+    first_words = len(PHRASES[0][1].split())
+    for (start_ms, end_ms), first, last in zip(
+        (span for span, _ in PHRASES), (0, first_words), (first_words - 1, -1), strict=True
+    ):
+        assert abs(words[first]["start_ms"] - start_ms) <= EDGE_MS, words[first]
+        assert abs(words[last]["end_ms"] - end_ms) <= EDGE_MS, words[last]
+    [marker] = segment["markers"]
+    assert first_words < marker["after_word"] < len(words) - 1
     assert "⟦A⟧" in ended["data"]["final_text"].split("Please", 1)[1]
 
     upload = api.uploads[0]
@@ -93,7 +97,7 @@ async def test_a_dictation_on_the_plugin_gets_estimated_word_times_and_a_marker(
 
 
 async def test_a_transcribe_session_on_the_plugin(daemon: Harness, api: FakeBatch) -> None:
-    _answer(api, "one two", "three four")
+    _answer(api, "one two three four")
     setup = _setup(_config(api), Credentials(file_keys={"openai": "sk-test"}))
     await daemon.start(setup=setup)
     client, _ = await daemon.connect("Talkey")

@@ -55,7 +55,7 @@ async def test_one_tracks_reconnect_leaves_the_other_tracks_connection_alone() -
     # Replies go in commit order across connections: each track's first commit gets a slow one,
     # so the system track's log is still whole when its connection fails.
     slow = [FakeReply("lost", delay_s=5.0), FakeReply("held", delay_s=5.0)]
-    backend = fake([*slow, "a", "b", "c", "d"], interval_s=1.5)
+    backend = fake([*slow, "a", "b", "c", "d"], chunk_s=1.5)
     mic = WavCapture(FIXTURES / "jargon.wav")
     await mic.start()
     capture = system_capture("--wav", str(FIXTURES / "two_phrases.wav"))
@@ -115,7 +115,7 @@ async def test_a_capture_with_no_audio_at_the_start_still_starts_then_reports_it
 
 
 async def test_a_fatal_backend_error_on_one_track_ends_the_session_with_both_tracks_text() -> None:
-    backend = fake(["one", "two", "three", "four", "five", "six"], interval_s=1.0)
+    backend = fake(["one", "two", "three", "four", "five", "six"], chunk_s=1.0)
     mic = WavCapture(FIXTURES / "jargon.wav")
     await mic.start()
     capture = system_capture("--wav", str(FIXTURES / "two_phrases.wav"))

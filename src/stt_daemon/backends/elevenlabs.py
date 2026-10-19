@@ -74,7 +74,9 @@ CAPABILITIES = Capabilities(
     partials=True,
     hints=frozenset({"keyterms", "previous_text"}),
     max_connection_s=15 * 60.0,
-    commit_policy=CommitPolicy(interval_s=25.0, check_every_s=5.0),
+    commit_policy=CommitPolicy(
+        pause_steps=((0, 3.5), (8, 2.0), (14, 0.8), (19, 0.6), (23, 0.3)), max_chunk_s=25.0
+    ),
 )
 
 

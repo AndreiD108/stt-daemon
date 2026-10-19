@@ -41,7 +41,10 @@ class Graph:
 
 async def start(daemon: Harness, graph: Graph, *, capacity: int | None = None) -> None:
     backend = FakeBackend(
-        [], capabilities=replace(FAKE_CAPABILITIES, commit_policy=CommitPolicy(at_pauses=True))
+        [],
+        capabilities=replace(
+            FAKE_CAPABILITIES, commit_policy=CommitPolicy(pause_steps=((0, 0.6),))
+        ),
     )
     if capacity is not None:
         backend.capacity = capacity

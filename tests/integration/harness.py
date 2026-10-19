@@ -33,10 +33,14 @@ type Msg = dict[str, Any]
 
 
 def fake(
-    replies: list[FakeReply | str] | None = None, interval_s: float | None = None
+    replies: list[FakeReply | str] | None = None,
+    chunk_s: float | None = None,
+    pause_s: float | None = None,
 ) -> FakeBackend:
+    """With `pause_s`, every pause that long commits."""
     replies = replies or []
-    policy = CommitPolicy(interval_s=interval_s, check_every_s=0.1)
+    steps = () if pause_s is None else ((0.0, pause_s),)
+    policy = CommitPolicy(pause_steps=steps, max_chunk_s=chunk_s)
     return FakeBackend(replies, capabilities=replace(FAKE_CAPABILITIES, commit_policy=policy))
 
 

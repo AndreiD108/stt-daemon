@@ -11,8 +11,8 @@ import numpy as np
 
 from ..audio.capture import CaptureSource
 from ..audio.frames import Attachment, Frame
-from ..audio.vad import WINDOW, SpeechEnded, StreamingVAD
-from ..backends.base import Backend, CommitPolicy, Committed, OpenFailed, OpenOptions
+from ..audio.vad import WINDOW, StreamingVAD
+from ..backends.base import Backend, Committed, OpenFailed, OpenOptions
 from ..config import Config
 from .pause_gate import Outgoing, PauseGate
 from .recovery import Link
@@ -52,11 +52,7 @@ class Track:
         capture: CaptureSource,
         backend: Backend,
         segments: Segments,
-        at_pauses: bool,
-        chunk_cap_s: float | None,
-        wall_commits: bool,
     ) -> None:
-        """`wall_commits`: commit on the backend's `interval_s` wall-clock cadence."""
         self.name = name
         self.capture = capture
         self.segments = segments
@@ -78,15 +74,11 @@ class Track:
             hold_s=self._vad.start_delay_s + pad_s + 2 * WINDOW / rate, pad_s=pad_s
         )
         self.timeline = Timeline(0.0, rate)
-        self._at_pauses = at_pauses
-        self._chunk_cap_s = chunk_cap_s
-        self._wall_commits = wall_commits
+        self._policy = backend.capabilities.commit_policy
         self._attachment: Attachment | None = None
         self._speech_since_commit = False
         self._samples_since_commit = 0
-        self._last_commit_at = 0.0
         self._audio_task: asyncio.Task[None] | None = None
-        self._commit_task: asyncio.Task[None] | None = None
         self._end_put: asyncio.Future[None] | None = None
 
     def begin(self, attachment: Attachment, origin: float, options: OpenOptions) -> None:
@@ -119,12 +111,8 @@ class Track:
             await self.link.open()
 
     def run(self) -> None:
-        self._last_commit_at = time.monotonic()
         self._audio_task = asyncio.create_task(self._audio_loop())
         self._audio_task.add_done_callback(self._audio_loop_done)
-        policy = self._backend.capabilities.commit_policy
-        if policy.interval_s is not None and self._wall_commits:
-            self._commit_task = asyncio.create_task(self._commit_loop(policy))
 
     def detach(self) -> None:
         if self._attachment is not None:
@@ -154,8 +142,6 @@ class Track:
             if self._end_put is not None:
                 self._end_put.cancel()
         await asyncio.wait([self._audio_task])
-        if self._commit_task is not None:
-            self._commit_task.cancel()
 
     async def flush(self) -> None:
         """After `stop_intake`: send the held audio, commit, wait for every answer."""
@@ -186,35 +172,30 @@ class Track:
             frame = part
         self.audio_end = frame.end
         events = self._vad.push(frame)
-        for part in self._gate.push(frame, events):
+        parts = self._gate.push(frame, events)
+        for part in parts:
             self._queue(part)
-        paused = any(isinstance(e, SpeechEnded) for e in events)
-        if self._at_pauses and paused and self._speech_since_commit:
+        # The gate stays open through a pause until the VAD confirms it; that tail isn't speech.
+        heard = self._vad.speech_id is not None and self._vad.pause_s < frame.duration
+        if parts and heard:
+            self._speech_since_commit = True
+        sent_s = self._samples_since_commit / self.capture.sample_rate
+        pause_s = self._policy.pause_for(sent_s)
+        if pause_s is not None and self._speech_since_commit and self._vad.pause_s >= pause_s:
             self._commit()
-        cap = self._chunk_cap_s
-        if cap is not None and self._samples_since_commit >= cap * self.capture.sample_rate:
+        cap = self._policy.max_chunk_s
+        if cap is not None and sent_s >= cap:
             self._commit()
         assert self.link is not None
         self.link.tick(speaking=self._vad.speech_id is not None)
-
-    async def _commit_loop(self, policy: CommitPolicy) -> None:
-        assert policy.interval_s is not None
-        while True:
-            await asyncio.sleep(policy.check_every_s or policy.interval_s)
-            due = time.monotonic() - self._last_commit_at >= policy.interval_s
-            if due and self._speech_since_commit:
-                self._commit()
 
     def _queue(self, out: Outgoing) -> None:
         assert self.link is not None
         self.link.queue(out)
         self._samples_since_commit += out.frame.samples.size
-        if self._gate.speaking:
-            self._speech_since_commit = True
 
     def _commit(self, *, final: bool = False) -> None:
         assert self.link is not None
         self.link.commit(final=final)
         self._samples_since_commit = 0
         self._speech_since_commit = False
-        self._last_commit_at = time.monotonic()

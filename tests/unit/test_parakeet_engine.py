@@ -13,6 +13,7 @@ from stt_daemon import daemon
 from stt_daemon.audio.frames import Samples
 from stt_daemon.backends import parakeet
 from stt_daemon.backends.base import (
+    PAUSE_STEPS,
     BackendEvent,
     Closed,
     Committed,
@@ -266,7 +267,7 @@ async def test_recognizer_settings_come_from_config(tmp_path: Path) -> None:
     engine = Engine(loader)
     backend = _backend(tmp_path, engine, num_threads=3, hotwords_score=2.0, max_chunk_seconds=12)
     assert backend.capabilities.commit_policy.max_chunk_s == 12
-    assert backend.capabilities.commit_policy.at_pauses
+    assert backend.capabilities.commit_policy.pause_steps == PAUSE_STEPS
     await (await backend.open(OpenOptions(), 1, lambda _: None)).close()
     await asyncio.to_thread(loader.started.wait, 2)
     [key] = loader.keys

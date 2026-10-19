@@ -31,7 +31,8 @@ class Backend:
   `config` is the `[backends.<name>]` table from `config.toml`, `{}` without one. Keep it quick:
   load models on the first `transcribe`, not here.
 - `transcribe` gets the audio of one chunk, 16 kHz mono signed 16-bit little-endian PCM, and
-  returns its text. The daemon cuts chunks at pauses in speech, and at
+  returns its text. The daemon cuts chunks at pauses in speech (longer pauses early in a chunk,
+  shorter as it grows; see the protocol's `segment` event), and at
   `backends.<name>.max_chunk_seconds` (default 30, at least 5) of speech with no pause. It calls
   `transcribe` once per chunk, in order, one call at a time for the plugin; a dictation's chunks
   go before other sessions' waiting ones. A chunk under 0.1 s gets empty text without a call. It runs on the daemon's event loop, so blocking work

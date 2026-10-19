@@ -93,6 +93,5 @@ class Segments:
 
     def _timed(self, conn: int, word: Word) -> TimedWord:
         tl = self.timeline
-        start = tl.to_ms(tl.to_capture(conn, word.start_s, "start"))
-        end = tl.to_ms(tl.to_capture(conn, word.end_s, "end"))
+        start, end = (tl.to_ms(t) for t in tl.word_span(conn, word.start_s, word.end_s))
         return TimedWord(word.text, start, max(end, start), word.speaker)

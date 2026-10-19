@@ -29,11 +29,11 @@ async def session(
     fixture: Path,
     replies: list[FakeReply | str],
     *,
-    interval_s: float | None = None,
+    chunk_s: float | None = None,
     marker_at_ms: int | None = None,
 ) -> tuple[list[Msg], Msg]:
     """Segments and the end of a word-timed session from the fixture's first sample."""
-    policy = CommitPolicy(interval_s=interval_s, check_every_s=0.1)
+    policy = CommitPolicy(max_chunk_s=chunk_s)
     capabilities = replace(FAKE_CAPABILITIES, commit_policy=policy)
     backend = FakeBackend(replies, capabilities=capabilities, text_only=True)
     capture = WavCapture(fixture)
@@ -89,7 +89,7 @@ async def test_three_phrases_with_jargon(daemon: Harness) -> None:
 
 async def test_later_commits_on_a_connection_map_to_their_own_audio(daemon: Harness) -> None:
     replies: list[FakeReply | str] = [f"w{i}a w{i}b w{i}c" for i in range(12)]
-    segs, _ = await session(daemon, FIXTURE, replies, interval_s=1.0)
+    segs, _ = await session(daemon, FIXTURE, replies, chunk_s=1.0)
     assert len(segs) >= 4
     words = [w for s in segs for w in s["words"]]
     edges = [t for w in words for t in (w["start_ms"], w["end_ms"])]
