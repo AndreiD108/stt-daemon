@@ -15,6 +15,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from .. import __version__
+from ..audio import aec_pipewire
 from ..audio.capture import CaptureSource
 from ..audio.pw_capture import AppTarget, PwRecordCapture
 from ..audio.vad import VadEvent
@@ -62,10 +63,12 @@ class Server(Starts):
         reload_setup: Callable[[], Setup],
         system_capture: Callable[[AppTarget | None], PwRecordCapture] = system_capture,
         sources: SourceScan | None = None,
+        aec_command: aec_pipewire.Command = aec_pipewire.pw_cli_command,
     ) -> None:
         """`reload_setup` re-reads config and credentials; it raises `ConfigError` or
         `CredentialsError`. `system_capture` makes a `system` session's system track, following
-        an app's stream or not. Construct on the loop."""
+        an app's stream or not, and records the echo-cancelled mic; `aec_command` loads the
+        echo-cancel module. Construct on the loop."""
         self.path = path
         self.capture = capture
         self.setup = setup
@@ -73,6 +76,7 @@ class Server(Starts):
         self._system_capture = system_capture
         self._sources = sources or SourceScan()
         self._sources.on_event = self._source_event
+        self._aec_command = aec_command
         self._connections: set[Connection] = set()
         self._welcomed: dict[str, Connection] = {}
         self._handlers: set[asyncio.Task[None]] = set()

@@ -26,7 +26,7 @@ from stt_daemon.credentials import (
 )
 from stt_daemon.service.common import ServiceError, daemon_executable, run_command
 from stt_daemon.service.launchd import Launchd
-from stt_daemon.service.preflight import check_portaudio, check_tool
+from stt_daemon.service.preflight import check_pipewire_aec, check_portaudio, check_tool
 from stt_daemon.service.systemd import Systemd
 
 KEY_BACKENDS = [name for name, cls in BACKENDS.items() if cls.takes_key]
@@ -180,6 +180,10 @@ def _service(args: argparse.Namespace) -> int:
                 print(f"system audio sessions need pw-record: {problem}")
             if sys.platform == "linux" and (problem := check_tool("pw-dump")):
                 print(f"picking one app's audio needs pw-dump: {problem}")
+            if sys.platform == "linux" and (
+                problem := check_tool("pw-cli") or check_pipewire_aec()
+            ):
+                print(f"echo cancellation on a system session's mic track: {problem}")
             print(BACKEND_SETUP)
         case "remove":
             removed = manager.remove()

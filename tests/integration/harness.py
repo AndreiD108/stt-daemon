@@ -12,6 +12,7 @@ from typing import Any
 
 import numpy as np
 
+from stt_daemon.audio import aec_pipewire
 from stt_daemon.audio.capture import CaptureSource
 from stt_daemon.audio.pw_capture import AppTarget, PwRecordCapture
 from stt_daemon.audio.wav_capture import WavCapture
@@ -137,9 +138,13 @@ class Harness:
         backends: dict[str, Backend] | None = None,
         system_capture: Callable[[AppTarget | None], PwRecordCapture] | None = None,
         sources: SourceScan | None = None,
+        aec_command: aec_pipewire.Command | None = None,
     ) -> Server:
-        """Without `sources`, no source scan runs."""
+        """Without `sources`, no source scan runs; without `aec_command`, echo cancellation is
+        off."""
         config = config or Config()
+        if aec_command is None:
+            config = replace(config, audio=replace(config.audio, echo_cancel="off"))
         if backends is None:
             backends = {"fake": backend or fake()}
         self.capture = capture = capture or WavCapture()
@@ -151,6 +156,7 @@ class Harness:
             reload_setup=self._reload,
             system_capture=system_capture or real_system_capture,
             sources=sources or SourceScan(enabled=False),
+            aec_command=aec_command or aec_pipewire.pw_cli_command,
         )
         await server.start()
         return server

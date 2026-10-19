@@ -101,14 +101,19 @@ class SourceTable:
         """Registry id → source."""
         self._binaries: dict[int, str | None] = {}
         """Client registry id → its process binary."""
+        self._named: dict[int, tuple[str, str]] = {}
+        """Registry id → (node.name, serial), for every node."""
         self._ids = itertools.count(1)
 
     def sources(self) -> list[Source]:
         return list(self._nodes.values())
 
+    def node_serial(self, name: str) -> str | None:
+        return next((serial for n, serial in self._named.values() if n == name), None)
+
     def clear(self) -> list[SourceEvent]:
         events: list[SourceEvent] = [SourceRemoved(s) for s in self._nodes.values()]
-        self._nodes, self._binaries = {}, {}
+        self._nodes, self._binaries, self._named = {}, {}, {}
         return events
 
     def update(self, objects: Sequence[object]) -> list[SourceEvent]:
@@ -126,12 +131,18 @@ class SourceTable:
                 continue
             if "info" in item and item["info"] is None:
                 self._binaries.pop(key, None)
+                self._named.pop(key, None)
                 if (gone := self._nodes.pop(key, None)) is not None:
                     events.append(SourceRemoved(gone))
                 continue
             if item.get("type") != "PipeWire:Interface:Node":
                 continue
-            events += self._node(key, _props(item))
+            props = _props(item)
+            if props is not None:
+                name, serial = _text(props, "node.name"), props.get("object.serial")
+                if name is not None and isinstance(serial, int | str):
+                    self._named[key] = (name, str(serial))
+            events += self._node(key, props)
         return events
 
     def _node(self, key: int, props: Mapping[str, Any] | None) -> list[SourceEvent]:
@@ -193,6 +204,7 @@ class SourceScan:
         self._retry_s = retry_s
         self._table = SourceTable()
         self._waiters: list[tuple[Callable[[Source], bool], asyncio.Future[Source]]] = []
+        self._node_waiters: list[tuple[str, asyncio.Future[str]]] = []
         self._task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
@@ -228,6 +240,22 @@ class SourceScan:
 
     def follow(self, source: Source) -> "Follow":
         return Follow(self, source)
+
+    def node_serial(self, name: str) -> str | None:
+        """The serial of the node with this `node.name`, of any media class."""
+        return self._table.node_serial(name)
+
+    async def wait_node(self, name: str) -> str:
+        """The serial of the node with this `node.name`, now or once it appears."""
+        if (serial := self.node_serial(name)) is not None:
+            return serial
+        future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        waiter = (name, future)
+        self._node_waiters.append(waiter)
+        try:
+            return await future
+        finally:
+            self._node_waiters.remove(waiter)
 
     async def _run(self) -> None:
         failed_before = False
@@ -280,6 +308,9 @@ class SourceScan:
         return printed, proc.returncode
 
     def _dispatch(self, events: list[SourceEvent]) -> None:
+        for name, future in self._node_waiters:
+            if not future.done() and (serial := self.node_serial(name)) is not None:
+                future.set_result(serial)
         for event in events:
             if isinstance(event, SourceAdded):
                 for match, future in self._waiters:

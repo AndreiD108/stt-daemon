@@ -21,6 +21,9 @@ log = logging.getLogger(__name__)
 
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
 DEFAULT_MAX_SESSIONS = 2
+ECHO_CANCEL = ("auto", "pipewire", "builtin", "off")
+
+type EchoCancel = typing.Literal["pipewire", "builtin", "off"]
 
 
 class ConfigError(Exception):
@@ -35,6 +38,8 @@ class AudioConfig:
     buffer_ms: int = 5000
     pre_start_ms: int = 1000
     chunk_ms: int = 200
+    echo_cancel: str = "auto"
+    """For a system session's mic track: auto, pipewire, builtin or off."""
 
 
 @dataclass
@@ -124,6 +129,14 @@ class Config:
     server: ServerConfig = field(default_factory=ServerConfig)
     backends: BackendsConfig = field(default_factory=BackendsConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+
+
+def echo_cancel_mode(audio: AudioConfig, platform: str | None = None) -> EchoCancel:
+    """`auto` is the PipeWire module on Linux, the built-in canceller elsewhere."""
+    platform = sys.platform if platform is None else platform
+    if audio.echo_cancel == "auto":
+        return "pipewire" if platform == "linux" else "builtin"
+    return typing.cast(EchoCancel, audio.echo_cancel)
 
 
 def config_dir(env: Mapping[str, str] | None = None) -> Path:
@@ -233,6 +246,7 @@ def _validate(config: Config, path: Path) -> None:
     check(audio.buffer_ms > 0, "audio.buffer_ms", "positive")
     check(0 <= audio.pre_start_ms <= audio.buffer_ms, "audio.pre_start_ms", "0 to audio.buffer_ms")
     check(50 <= audio.chunk_ms <= 1000, "audio.chunk_ms", "50 to 1000")
+    check(audio.echo_cancel in ECHO_CANCEL, "audio.echo_cancel", f"one of {', '.join(ECHO_CANCEL)}")
     check(0.0 <= vad.threshold <= 1.0, "vad.threshold", "0 to 1")
     check(vad.min_speech_ms >= 0, "vad.min_speech_ms", "0 or more")
     check(vad.min_silence_ms > 0, "vad.min_silence_ms", "positive")

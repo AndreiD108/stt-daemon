@@ -8,8 +8,8 @@ A `transcribe` session reads a `ByteStreamCapture` on audio time: it commits at 
 chunk cap instead of on a wall-clock cadence, and its `stop` means the end of input.
 
 A `system` session has a `system` track (a `PwRecordCapture`) and, optionally, a `mic` track on
-the shared mic. A track whose capture stops goes silent and is reported; only a backend failure,
-on either track, ends the session.
+the shared mic or its echo-cancelled copy. A track whose capture stops goes silent and is
+reported; only a backend failure, on either track, ends the session.
 
 A non-`mic` session can be suspended for a dictation: its links drop their connections and keep
 the audio; on resume new connections get all of it.
@@ -23,6 +23,7 @@ from collections.abc import Callable, Coroutine
 from dataclasses import replace
 from typing import Any, Literal
 
+from ..audio.aec_pipewire import EchoCancelledMic
 from ..audio.capture import CaptureSource, CaptureUnavailable
 from ..audio.frames import Attachment, epoch_ms
 from ..audio.pw_capture import PwRecordCapture
@@ -74,10 +75,11 @@ class Session:
         emit: Callable[[SessionEvent], None],
         kind: SessionKind = "mic",
         mic: CaptureSource | None = None,
+        session_id: str | None = None,
     ) -> None:
         """`capture` is the first track's source; `mic` adds a `mic` track to a `system`
         session."""
-        self.session_id = uuid.uuid4().hex
+        self.session_id = session_id or uuid.uuid4().hex
         self.kind: SessionKind = kind
         self.started: SessionStarted | None = None
         self._config = config
@@ -138,9 +140,11 @@ class Session:
                     wall_commits=self._stream is None,
                 )
             )
-            if isinstance(source, PwRecordCapture):
+            if isinstance(source, PwRecordCapture | EchoCancelledMic):
                 source.on_lost = self._capture_lost(name)
                 source.on_restored = self._capture_restored(name)
+            if isinstance(source, EchoCancelledMic):
+                source.on_unavailable = self._aec_unavailable(name)
         for track in self._tracks:
             track.segments.peers = [t.segments for t in self._tracks if t is not track]
         self._first = self._tracks[0]
@@ -210,8 +214,11 @@ class Session:
             track.run()
         self._emit(self.started)
         for track in self._tracks:
-            if isinstance(track.capture, PwRecordCapture) and track.capture.lost_reason:
-                self._capture_lost(track.name)(track.capture.lost_reason)
+            capture = track.capture
+            if isinstance(capture, EchoCancelledMic) and capture.unavailable_reason:
+                self._aec_unavailable(track.name)(capture.unavailable_reason)
+            if isinstance(capture, PwRecordCapture | EchoCancelledMic) and capture.lost_reason:
+                self._capture_lost(track.name)(capture.lost_reason)
         return self.started
 
     def add_marker(
@@ -371,6 +378,13 @@ class Session:
                 self._emit(SessionError("capture_restored", message, fatal=False, track=name))
 
         return restored
+
+    def _aec_unavailable(self, name: str | None) -> Callable[[str], None]:
+        def unavailable(message: str) -> None:
+            if self._state in ("running", "stopping"):
+                self._emit(SessionError("aec_unavailable", message, fatal=False, track=name))
+
+        return unavailable
 
     def _report_progress(self, *, final: bool) -> None:
         now = time.monotonic()

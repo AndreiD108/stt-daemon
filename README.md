@@ -99,7 +99,8 @@ On Linux, a client can transcribe what your machine plays, a call or a video, wi
 `start_system_session`. With `with_mic`, your mic is a second track, so both sides of a call come
 out as one transcript, each line marked `[system]` or `[mic]`. It runs next to your dictation and
 takes no mic slot. It needs `pw-record`, from your distribution's PipeWire tools;
-`stt-daemon service install` names the package when it is missing.
+`stt-daemon service install` names the package when it is missing. The mic track has echo
+cancellation on Linux, so speakers are fine.
 
 To take one application's audio only, say the call app and not the music next to it, a client
 picks it from the sources the daemon lists (every app that plays audio, with its name) and starts

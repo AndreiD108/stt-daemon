@@ -2,8 +2,9 @@
 
 The script prints the current registry as one pretty-printed array, then each change written to
 the feed after it. `FakePipeWire` keeps the registry in files under one directory: `feed` (one
-compact array per change), `snapshot.json`, and `live` (serials of the playing streams, which
-`fake_pw_record.py --live` reads).
+compact array per change), `snapshot.json`, and `live` (serials of the playing streams and
+sources, which `fake_pw_record.py --live` reads). `FakePipeWire.reopen` continues that state from
+another process (the `pw-cli` stand-in).
 """
 
 import argparse
@@ -19,17 +20,29 @@ from typing import Any
 FAKE_PW_DUMP = str(Path(__file__))
 
 
+LISTED_CLASSES = ("Stream/Output/Audio", "Audio/Source")
+
+
 class FakePipeWire:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, fresh: bool = True, ids_from: int = 200) -> None:
         self.root = root
         root.mkdir(parents=True, exist_ok=True)
         self.feed = root / "feed"
         self.live = root / "live"
-        self.feed.write_text("")
         self._objects: dict[int, dict[str, Any]] = {}
-        self._ids = itertools.count(200)
-        self._serials = itertools.count(20000)
-        self._write_state()
+        self._ids = itertools.count(ids_from)
+        self._serials = itertools.count(ids_from * 100)
+        if fresh:
+            self.feed.write_text("")
+            self._write_state()
+
+    @classmethod
+    def reopen(cls, root: Path) -> "FakePipeWire":
+        """The registry as written so far; ids from this process's own range."""
+        pipewire = cls(root, fresh=False, ids_from=1000 + os.getpid() % 100000 * 10)
+        for obj in json.loads((root / "snapshot.json").read_text()):
+            pipewire._objects[obj["id"]] = obj
+        return pipewire
 
     def command(self, *extra: str) -> list[str]:
         return [sys.executable, FAKE_PW_DUMP, "--dir", str(self.root), *extra]
@@ -60,6 +73,21 @@ class FakePipeWire:
         )
         return node_id, str(serial)
 
+    def add_source(self, node_name: str) -> tuple[int, str]:
+        """An `Audio/Source` node, as the echo-cancel module makes; (registry id, serial)."""
+        node_id, serial = next(self._ids), next(self._serials)
+        props: dict[str, Any] = {
+            "media.class": "Audio/Source",
+            "node.name": node_name,
+            "object.id": node_id,
+            "object.serial": serial,
+        }
+        self._change([_object(node_id, "Node", props)])
+        return node_id, str(serial)
+
+    def remove(self, node_id: int) -> None:
+        self._change([{"id": node_id, "info": None}])
+
     def stop(self, node_id: int) -> None:
         client = self._objects[node_id]["info"]["props"]["client.id"]
         self._change([{"id": node_id, "info": None}, {"id": client, "info": None}])
@@ -79,7 +107,7 @@ class FakePipeWire:
         serials = [
             str(o["info"]["props"]["object.serial"])
             for o in self._objects.values()
-            if o["info"]["props"].get("media.class") == "Stream/Output/Audio"
+            if o["info"]["props"].get("media.class") in LISTED_CLASSES
         ]
         _replace(self.live, "".join(f"{s}\n" for s in serials))
 

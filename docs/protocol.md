@@ -265,6 +265,11 @@ until audio comes again: `session_error {code: "capture_restored", track, fatal:
 backend error on either track ends the session, with the text of both tracks. `session_started`
 waits up to 2 s for the first system audio; if none comes, `capture_lost` follows it.
 
+On Linux, the `mic` track has echo cancellation: PipeWire's echo-cancel module takes what the
+speakers play out of the mic, so the call's other side is not transcribed twice. When the module
+can't be loaded, or stops during the session, the track takes the plain mic and the client gets
+one `session_error {code: "aec_unavailable", track: "mic", fatal: false}`.
+
 With `app`, the track ends with the application's stream (the app closed, or stopped playing).
 The client gets `capture_lost`, and the daemon does not retry against the gone stream: it waits
 until a source of the same application appears (same `binary`; same `name` when the source had no
@@ -681,6 +686,7 @@ Codes of `error` replies, and of `session_error` for the backend codes.
 | `out_of_range` | `add_marker` | `at` is before `started_at`. |
 | `config` | `reload` | Config or credentials invalid; the last setup stays. |
 | `capture_lost`, `capture_restored` | `session_error`, `fatal: false` | A `system` session's track stopped getting audio, or gets it again; `track` names it. The session goes on. |
+| `aec_unavailable` | `session_error`, `fatal: false`, `track: "mic"` | The `mic` track of a `system` session takes the plain mic: echo cancellation could not start, or stopped. Sent once; the message says why and names the install command when something is missing. |
 | `internal` | any | The daemon failed; its log says why. |
 
 Backend codes come as the reply to a start command when the backend can't

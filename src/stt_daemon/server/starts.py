@@ -2,14 +2,19 @@
 slot, and their failures as `error` replies. Mixed into `Server`."""
 
 import contextlib
+import logging
 import sys
+import uuid
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
 
+from ..audio import aec_pipewire
+from ..audio.aec_pipewire import EchoCancelledMic, PipewireAec
 from ..audio.capture import CaptureSource, CaptureUnavailable
 from ..audio.pw_capture import AppTarget, PwRecordCapture
 from ..audio.stream_capture import ByteStreamCapture, ToolMissing, ffmpeg_command
 from ..backends.base import FileBackend, OpenFailed
+from ..config import Config, echo_cancel_mode
 from ..service.preflight import check_tool
 from ..session.context import ContextStore, scope_of
 from ..session.events import SessionEvent
@@ -22,6 +27,8 @@ from .slot import AnySession, ClientGone, Slot
 from .slot_state import StartRefused
 from .sources import Source, SourceScan
 from .speech import SpeechWatch
+
+log = logging.getLogger(__name__)
 
 
 def system_capture(target: AppTarget | None) -> PwRecordCapture:
@@ -56,6 +63,7 @@ class Starts:
     _speech: SpeechWatch
     _system_capture: Callable[[AppTarget | None], PwRecordCapture]
     _sources: SourceScan
+    _aec_command: aec_pipewire.Command
 
     async def _start(self, conn: Connection, message: Message, arrived: float) -> None:
         request = parse_start(message.data)
@@ -165,6 +173,7 @@ class Starts:
             tool = capture.command[0]
             if (problem := check_tool(tool)) is not None:
                 raise RequestError("tool_unavailable", problem, tool=tool)
+            session_id = uuid.uuid4().hex
             session = Session(
                 config=setup.config,
                 capture=capture,
@@ -172,7 +181,8 @@ class Starts:
                 options=resolved.options,
                 emit=emit,
                 kind="system",
-                mic=self.capture if request.with_mic else None,
+                mic=self._mic_track(setup.config, session_id) if request.with_mic else None,
+                session_id=session_id,
             )
             self._running[cid] = Running(
                 conn, session, request.start.label, resolved.context_key, message.id, app=app
@@ -183,6 +193,19 @@ class Starts:
             await self._slot.start_input(
                 conn.client, make_session=make_session, session_label=request.start.label
             )
+
+    def _mic_track(self, config: Config, session_id: str) -> CaptureSource:
+        """A system session's mic track: the mic with the speakers' sound taken out, when
+        `audio.echo_cancel` allows."""
+        mode = echo_cancel_mode(config.audio)
+        if mode == "builtin":
+            log.info("built-in echo cancellation is not available; the mic track takes the mic")
+        if mode != "pipewire":
+            return self.capture
+        aec = PipewireAec(
+            f"stt-daemon-aec-{session_id}", nodes=self._sources, command=self._aec_command
+        )
+        return EchoCancelledMic(self.capture, aec, cleaned=self._system_capture)
 
     @contextlib.contextmanager
     def _starting(self, cid: str) -> Generator[None]:

@@ -203,6 +203,26 @@ async def test_an_app_without_a_binary_is_followed_by_name(tmp_path: Path) -> No
         await scan.close()
 
 
+async def test_a_node_is_found_by_name_once_it_appears_and_not_listed_as_a_source(
+    tmp_path: Path,
+) -> None:
+    graph = FakePipeWire(tmp_path)
+    scan = SourceScan(graph.command(), enabled=True)
+    scan.start()
+    try:
+        waiting = asyncio.create_task(scan.wait_node("stt-daemon-aec-1"))
+        await asyncio.sleep(0.2)
+        graph.add_source("other")
+        node, serial = graph.add_source("stt-daemon-aec-1")
+        assert await asyncio.wait_for(waiting, 3) == serial
+        assert scan.node_serial("stt-daemon-aec-1") == serial
+        assert scan.sources() == []
+        graph.remove(node)
+        await wait_until(lambda: scan.node_serial("stt-daemon-aec-1") is None)
+    finally:
+        await scan.close()
+
+
 def test_sources_go_on_the_wire_without_their_serial() -> None:
     source = Source("src_7", "123", "Zoom", "zoom", "Playback")
     assert source.to_wire() == {
