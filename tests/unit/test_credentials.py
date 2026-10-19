@@ -121,6 +121,13 @@ def test_write_key_rejects_bad_keys_without_echoing(tmp_path: Path, key: str) ->
     assert not (tmp_path / "c.toml").exists()
 
 
+def test_a_hyphenated_backend_name_has_a_key_and_an_env_name(tmp_path: Path) -> None:
+    path = write_key("my-plugin", "k1", path=tmp_path / "c.toml")
+    assert load_credentials(path=path, env={}).get("my-plugin") == "k1"
+    env = {"MY_PLUGIN_API_KEY": "k2"}
+    assert load_credentials(path=path, env=env).get("my-plugin") == "k2"
+
+
 def test_write_key_rejects_bad_backend_name(tmp_path: Path) -> None:
     with pytest.raises(CredentialsError, match="backend name"):
         write_key("../x", "k", path=tmp_path / "c.toml")

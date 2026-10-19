@@ -385,7 +385,7 @@ daemon shutdown cancels a `transcribe` session at any point, finishing or not.
 {}
 ```
 
-Re-reads config and credentials and rescans installed backends. Sent by the `stt-daemon` CLI after
+Re-reads config and credentials, rescans installed backends and imports the plugin files again. Sent by the `stt-daemon` CLI after
 `key set`, `backend install`, `backend remove` and `backend set-default`. A running session keeps
 its backend, even one no longer set up; a removed Parakeet model leaves memory when its last
 session ends. New `backends.parakeet.num_threads` and `hotwords_score` values apply once no
@@ -399,6 +399,30 @@ sessions started after the reload, but VAD events keep the old settings until a 
 other client gets the same `backends` event. Or `error {code: "config"}` when the config or
 credentials file is invalid (bad TOML, a bad value, credentials not mode 600); the daemon keeps its
 last setup.
+
+### `backends_status`
+
+```json
+{}
+```
+
+Reply: `backends_status`, every backend the daemon knows with its status, and the plugin files that
+did not load. `stt-daemon backend list` prints it.
+
+```json
+{
+  "backends": [
+    {"name": "elevenlabs", "status": "ready", "default": true},
+    {"name": "parakeet", "status": "not installed", "default": false},
+    {"name": "openai", "status": "no key", "default": false},
+    {"name": "local-whisper", "status": "failed: RuntimeError: no GPU found", "default": false}
+  ],
+  "failed_files": [{"file": "broken.py", "status": "failed: SyntaxError: invalid syntax"}]
+}
+```
+
+`status` is `ready`, `no key`, `not installed`, or `failed: ` and the first line of the error.
+Only `ready` backends are in `welcome` and `backends`.
 
 ### `ping`
 
@@ -435,7 +459,9 @@ sent during a slow start waits for the start; a `ping` doesn't).
 - `backends` lists only the backends set up on this machine; empty when none is. Today:
   `elevenlabs` and `elevenlabs-batch` (an API key is set; the batch one has `partials: false`,
   `hints: ["keyterms"]`, `diarize: true`, `kinds: ["transcribe"]`) and `parakeet` (local model
-  installed; `languages: ["auto"]`, `partials: false`, `hints: ["keyterms"]`).
+  installed; `languages: ["auto"]`, `partials: false`, `hints: ["keyterms"]`), then each plugin
+  backend set up, by its name (see [plugins.md](plugins.md)). Plugins have `partials: false`,
+  `word_timestamps: true` and every kind.
 - `diarize`: the backend tells speakers apart (see [`transcribe`](#transcribe)).
 - `kinds`: the session kinds the backend takes.
 - `default_backend`: the user's global default, `null` when there is no backend; the first backend
@@ -718,7 +744,7 @@ the cause.
 | `concurrency_limit` | no | The provider refused one more connection: the account's concurrent sessions are in use. A `start_session` that gets it suspends a session of another kind on that backend, if there is one, and tries once more. |
 | `rate_limited` | yes, during a session | Throttled. At start (HTTP 429) it isn't retried; start again later. |
 | `network` | yes | The connection failed or timed out. |
-| `backend_error` | yes (ElevenLabs), no (Parakeet decode) | The backend failed. |
+| `backend_error` | yes (ElevenLabs), no (Parakeet decode, plugins) | The backend failed. |
 | `session_limit`, `idle_drop` | yes | The backend ended a connection (time limit, no audio). |
 
 "Retried" means the daemon reconnects; it still gives up after 3 failed reconnects, with that

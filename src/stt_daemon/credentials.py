@@ -15,7 +15,7 @@ from typing import Any, cast
 from stt_daemon.config import atomic_write, config_dir, toml_string
 
 _KEY_NAME = re.compile(r"[A-Z][A-Z0-9_]*_API_KEY")
-_BACKEND_NAME = re.compile(r"[a-z][a-z0-9_]*")
+_BACKEND_NAME = re.compile(r"[a-z][a-z0-9_-]*")
 
 
 class CredentialsError(Exception):
@@ -27,7 +27,7 @@ def credentials_path(env: Mapping[str, str] | None = None) -> Path:
 
 
 def key_env_name(backend: str) -> str:
-    return f"{backend.upper()}_API_KEY"
+    return f"{backend.upper().replace('-', '_')}_API_KEY"
 
 
 @dataclass(frozen=True, repr=False)

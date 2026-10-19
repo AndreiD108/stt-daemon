@@ -5,7 +5,7 @@ socket, and one session runs at a time. The wire protocol is in `docs/protocol.m
 
 ## Scope
 
-Overview of the whole repository. No nested CLAUDE.md.
+Overview of the whole repository. `tests/unit/` has its own CLAUDE.md for the unit tests.
 
 ## File tree
 
@@ -18,6 +18,7 @@ Use this tree as a map — scan it to find the parts your task touches, then go 
     ci.yml                ruff, pyright, pytest (unit + integration) on push and PR
 docs/                     agent- and client-facing docs
   protocol.md             wire protocol: every command and event
+  plugins.md              backend plugins: the contract, an example plugin, dependencies, status
   media/                  README GIFs: hero (listen), client (socket lines + app view), backends (cloud vs local)
 src/                      package source
   stt_daemon/             the `stt-daemon` package
@@ -38,13 +39,15 @@ src/                      package source
       silero_vad.onnx     bundled silero VAD model (from sherpa-onnx releases)
       silero_vad.LICENSE  its MIT license
     backends/             transcription backends behind one interface; BACKENDS registry in __init__
-      __init__.py         BACKENDS: name → backend class
+      __init__.py         BACKENDS: name → built-in backend class
       base.py             the contract: Backend, Connection, FileBackend (whole files), events, Capabilities; keyterm merge, previous_text trim
       elevenlabs.py       Scribe v2 Realtime: retrying open, padded short commits, in-order acks, pad-free word times
       elevenlabs_wire.py  EL language codes (639-3 → 639-1), error message → code, HTTP status → code with EL text
       elevenlabs_batch.py  file upload API: transcribe only, bytes as sent, one retry, 20–30 s speaker runs → commits
       fake.py             FakeBackend for tests: scripted replies, partials, delays, failures, warnings, time limit, text only
+      chunked.py          ChunkedConnection: audio buffered, each commit's chunk transcribed in order; Turns (one at a time, dictation first)
       parakeet.py         local Parakeet TDT on sherpa-onnx: shared recognizer (load at open, decodes in turn, idle unload), token → word times
+      plugins.py          plugin files: import by path, checks, setup per load, limits; PluginBackend on the chunked connection, 120 s timeout
       install.py          `backend install parakeet`: download, SHA-256 check, unpack, bpe.vocab from tokens.txt
     server/               the socket side: connections, commands, mic and backend slots, event routing
       __init__.py         empty package marker
@@ -52,7 +55,7 @@ src/                      package source
       connection.py       Connection (send, slow-reader close), line reading, socket file prep, SocketInUse
       messages.py         JSONL envelope; per-command field checks → bad_request / invalid naming the field
       wire.py             session and VAD events → protocol event data (words, after_word only when asked)
-      backend_set.py      Setup: backends set up here, default; resolve a start (language, features, hints)
+      backend_set.py      Setup: backends set up here (plugins too), default, statuses, failure log; resolve a start (language, features, hints)
       starts.py           Starts mixin: start_session, transcribe, start_system_session → sessions; start errors as replies
       slot.py             Slot: mic slot idle/busy/evictable, takeover order, backend-only (transcribe) starts, slot changes
       slot_state.py       Client, Holder, SlotState (wire form), StartRefused (busy / session_active details)
@@ -84,7 +87,8 @@ src/                      package source
       systemd.py          unit and limits.conf rendering, ExecStart escaping; install/remove/status/logs
       launchd.py          macOS agent plist (TMPDIR and PATH kept); launchctl calls
       preflight.py        PortAudio load check, tools on PATH (ffmpeg, pw-record, pw-dump, pw-cli, audiotee), echo-cancel module files; install command per distro
-    cli.py                `stt-daemon` entry point: run, service, key set, backend set-default/install, listen, transcribe
+    plugin.py             public plugin contract: Backend, Capabilities, Options, Result, Word
+    cli.py                `stt-daemon` entry point: run, service, key set, backend set-default/install/remove/list, listen, transcribe
     control.py            one blocking request to the running daemon (hello, command, reply); `reload` after key set
     listen.py             `listen`: session client printing events; terminal keys (Enter, marker key, Ctrl-C)
     transcribe_client.py  `transcribe`: streams files as audio chunks, one session each; text or JSON out
@@ -98,59 +102,18 @@ tests/
   fake_audiotee.py        audiotee stand-in: its flags, WAV then silence in chunks, JSON stderr; pid not live, exit, stall, silent
   fake_pw_dump.py         pw-dump -m stand-in, and FakePipeWire: the test side that plays and stops streams, adds sources
   fake_pw_cli.py          pw-cli load-module stand-in: announces the echo-cancel source in a FakePipeWire; load error, exit, ignored TERM
-  fake_elevenlabs_batch.py  local stand-in for the EL upload API: records multipart fields, scripted answers, hold
+  fake_elevenlabs_batch.py  local stand-in for the EL upload API (any multipart POST): records fields, scripted answers, hold
   fixtures/
     two_phrases.wav       TTS speech, 16 kHz: phrases at 1.00–3.74 s and 5.74–7.81 s
     jargon.wav            TTS speech, 16 kHz: three phrases with jargon words, 2 s pauses
     pw_dump_monitor.json  recorded pw-dump -m -N (props trimmed): registry, a stream playing and ending, id reuse
-  unit/                   pure logic; local sockets only, never the mic or the internet
-    conftest.py           fixtures: local fake ElevenLabs server, backend pointed at it
-    fake_elevenlabs.py    that server: records requests and messages, scripted commit replies
-    test_backend_base.py  keyterm merge, previous_text trim
-    test_fake_backend.py  reply order, empty commits, delays, partials, failures, time limit
-    test_elevenlabs_open.py    open retries and budget, HTTP and message refusals, key kept out of logs
-    test_elevenlabs_stream.py  URL params, chunking, commits, padding, acks, partials, errors, self-commit
-    test_elevenlabs_batch.py   upload fields, PCM/WAV body, words and speaker split, HTTP codes, retry, cancel
-    test_frames.py        ring order, since-trimming, eviction, multi-attach, attach atomicity
-    test_capture.py       device choice, holds, callback, stall/status recovery, backoff, hung stop
-    test_wav_capture.py   WAV reading, real-time pacing, per-session open
-    test_pw_capture.py    system capture with a stand-in: frames, lost/restored, backoff, stall, release, following an app
-    test_sources.py       pw-dump parsing on the recording, ids, scan restarts, following an app's next stream, nodes by name
-    test_sources_macos.py  macOS scan on a stand-in Core Audio: names, ids, listener, polling, read failures, follow by bundle id; scan per platform
-    test_audiotee_capture.py  audiotee with a stand-in: command, frames, permission hint, exit error, quiet process kept, new pid followed
-    test_aec.py           built-in canceller on synthetic echo: echo drop, near-end kept, delay estimate and change over the search range, bypass, CPU; Parakeet (slow)
-    test_aec_builtin.py   built-in canceller as mic track: late-stamped far frames, far gap and restart, mic jump, settle at stop
-    test_aec_pipewire.py  echo-cancel module via a pw-cli stand-in: node wait, load errors, kill, plain-mic fallback; mode; install check
-    test_stream_capture.py  byte stream with a stand-in decoder: order, audio-time stamps, failures, backpressure
-    test_vad.py           edges on the fixture vs chunk size and window phase, delays, ids, gap reset
-    test_speech_watch.py  daemon-wide VAD: events, speech starts by id and expiry, mic going quiet
-    test_timeline.py      runs, cuts, edge snapping, jitter vs gaps, per-connection offsets
-    test_pause_gate.py    held silence, pre-speech pad, short vs long pauses, flush
-    test_word_times.py    syllable counts, words over spans, sentence ends, non-Latin split, capture → chunk spans
-    test_markers.py       word-gap placement, char fallback, empty text, queue
-    test_transcript.py    final-text joining, empty segments, tracks as lines in start order
-    test_track_segments.py  markers shared by two tracks: which segment takes each
-    test_session_audio.py   fixture sessions: word times through a cut, several commits, chunk cap, stop/cancel
-    test_session_lifecycle.py  silent sessions: leftover markers, marker refusals, failure, failed open
-    test_upload_session.py  upload session: segments per speaker, markers need at, failures, cancel, input cap
-    test_recovery.py      link alone: replay tail and pacing, retries, give-up, idle drop, hung send, rollover
-    test_recovery_edges.py  close-time ack, unknown provider cuts, final-ack failure, in-flight commit/stop
-    test_session_tracks.py  system sessions: per-track reconnect, capture loss, fatal error on one track, mic held before the system capture
-    test_session_recovery.py  fixture sessions: word times, markers, give-up, bounded stop during recovery
-    test_config.py        paths per OS, defaults, type errors, Parakeet limits, config writer and key removal
-    test_credentials.py   mode/owner checks, precedence, writer, stdin parsing, no key in errors
-    test_slot.py          slot states, sticky evictable, takeover order and failures, client_gone
-    slot_harness.py       Slot test rig: recorded events and slot changes, session makers, test clients
-    test_slot_priority.py  dictation priority: victim choice, resume order, backend gone, concurrency refusal retry
-    test_peer.py          peer pid/cmdline over real Unix sockets; macOS parsing on fixture bytes
-    test_messages.py      envelope parsing, encoding, per-command field checks
-    test_backend_set.py   setup and default, language default and checks, features, hints, context lookup
-    test_cli.py           run (broken config, --keys-stdin), key set and backend install default rule, set-default, backend remove, service files
-    test_transcribe_client.py  `transcribe` CLI vs a scripted daemon: file bytes, text and JSON output, exit codes
-    test_parakeet.py      token → word grouping, hotwords, per-commit decoding, failures, model check
-    test_parakeet_engine.py  load at open, one recognizer for all, decodes in turn, idle unload, load failure, reload
-    test_install.py       bpe.vocab, unpack once, partial model replaced, bad download / archive leaves nothing
-    test_service.py       unit/plist rendering, ExecStart escaping, systemctl calls, remove guard, PortAudio, ffmpeg and audiotee hints
+    plugins/              plugin files for loader, CLI and daemon tests
+      openai_transcriptions.py  the docs' example: OpenAI-compatible /audio/transcriptions over httpx, text only, needs a key
+      local_model.py      install() writes a model file, available() checks it; timed words
+      raising_setup.py    setup raises (two-line message)
+      builtin_name.py     named parakeet: refused as a built-in name
+      two_classes.py      two Backend subclasses in one file: refused
+  unit/                   pure logic, local sockets only (own CLAUDE.md): per-module tests, fake EL server, slot rig
   integration/            real daemon over a socket, WAV capture, fake backend
     conftest.py           `daemon` fixture
     harness.py            in-process Server on a temp socket; test clients; fixture helpers
@@ -160,6 +123,7 @@ tests/
     test_daemon_lifecycle.py  socket file, shutdown, context store, marker times
     test_daemon_speech.py     VAD event routing, speech_id starts (edge, expiry, mic closed, eviction)
     test_daemon_transcribe.py transcribe: ffmpeg and raw PCM, file-time word times, slots beside mic, decoder errors
+    test_daemon_plugins.py    example plugin on a local HTTP stand-in: dictation with estimated times and a marker, transcribe, API error, key set + reload
     test_daemon_batch.py      elevenlabs-batch over the socket: default rule, speakers, refusals, markers, disconnect
     test_daemon_priority.py   transcribe suspended by a dictation: same output as unsuspended; blocked writer stalls no one
     test_daemon_system.py     system sessions on pw-record and audiotee stand-ins: two tracks, dictation alongside, suspend/resume, fatal track, tool missing, pid

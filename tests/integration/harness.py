@@ -139,9 +139,12 @@ class Harness:
         system_capture: Callable[[AppTarget | None], SystemCapture] | None = None,
         sources: SourceScan | None = None,
         aec_command: aec_pipewire.Command | None = None,
+        setup: Setup | None = None,
+        reload_setup: Callable[[], Setup] | None = None,
     ) -> Server:
         """Without `sources`, no source scan runs; without `aec_command` or an `echo_cancel`
-        mode set in `config`, echo cancellation is off."""
+        mode set in `config`, echo cancellation is off. `setup` replaces `backends`;
+        `reload_setup` replaces `reloads`."""
         config = config or Config()
         if aec_command is None and config.audio.echo_cancel == "auto":
             config = replace(config, audio=replace(config.audio, echo_cancel="off"))
@@ -152,8 +155,8 @@ class Harness:
         self.server = server = Server(
             path=self.path,
             capture=capture,
-            setup=setup_with(config, backends),
-            reload_setup=self._reload,
+            setup=setup or setup_with(config, backends),
+            reload_setup=reload_setup or self._reload,
             system_capture=system_capture or real_system_capture,
             sources=sources or PwDumpScan(enabled=False),
             aec_command=aec_command or aec_pipewire.pw_cli_command,

@@ -57,7 +57,8 @@ def refused(setup: Setup, **request: object) -> RequestError:
 def test_load_setup_skips_backends_not_set_up_and_picks_a_default() -> None:
     setup = setup_of(FakeBackend(), FakeBackend())
     assert list(setup.backends) == ["b0", "b1"]
-    assert setup.unavailable == {"other": "no key; set one with `stt-daemon key set other`"}
+    unavailable = {name: p.message for name, p in setup.unavailable.items()}
+    assert unavailable == {"other": "no key; set one with `stt-daemon key set other`"}
     assert setup.default == "b0"
     assert setup_of(FakeBackend(), FakeBackend(), default="b1").default == "b1"
     assert setup_of(FakeBackend(), default="other").default == "b0"

@@ -2,10 +2,12 @@
 
 import logging
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 from ..backends import BACKENDS
 from ..backends.base import Backend, BackendUnavailable, FileBackend, OpenOptions
+from ..backends.plugins import NO_PLUGINS, Plugins, load_plugins, plugins_dir
 from ..config import Config
 from ..credentials import Credentials
 from ..session.events import SessionKind
@@ -28,10 +30,14 @@ NO_BACKEND = (
 class Setup:
     config: Config
     backends: Mapping[str, Backend]
-    """Set up here, in registry order."""
-    unavailable: Mapping[str, str]
+    """Set up here, in registry order, plugins last."""
+    unavailable: Mapping[str, BackendUnavailable]
     """Known but not set up: name → what is missing."""
     default: str | None
+    failed_files: Mapping[str, BackendUnavailable] = field(
+        default_factory=dict[str, BackendUnavailable]
+    )
+    """Plugin files that did not load: file name → why."""
 
     def to_wire(self) -> dict[str, object]:
         return {"backends": self.backends_wire(), "default_backend": self.default}
@@ -53,17 +59,65 @@ class Setup:
             for name, b in self.backends.items()
         ]
 
+    def status_wire(self) -> dict[str, list[dict[str, Any]]]:
+        """Every backend known here with its status; plugin files that did not load."""
+        statuses = {name: "ready" for name in self.backends} | {
+            name: status_of(problem) for name, problem in self.unavailable.items()
+        }
+        return {
+            "backends": [
+                {"name": name, "status": status, "default": name == self.default}
+                for name, status in statuses.items()
+            ],
+            "failed_files": [
+                {"file": file, "status": status_of(problem)}
+                for file, problem in self.failed_files.items()
+            ],
+        }
+
+    def log_failures(self) -> None:
+        """Plugins that failed, one log line each with the traceback."""
+        named = {f"backend {name}": p for name, p in self.unavailable.items()}
+        files = {f"plugin file {file}": p for file, p in self.failed_files.items()}
+        for where, problem in (named | files).items():
+            if problem.code == "failed":
+                detail = f"\n{problem.detail.rstrip()}" if problem.detail else ""
+                log.error("%s failed: %s%s", where, problem.message, detail)
+
+
+def status_of(problem: BackendUnavailable) -> str:
+    match problem.code:
+        case "no_key":
+            return "no key"
+        case "no_model" | "not_installed":
+            return "not installed"
+        case "failed":
+            return f"failed: {problem.message}"
+        case _:
+            return problem.message
+
+
+def installed_plugins() -> Plugins:
+    """The plugins in the user's plugin directory."""
+    return load_plugins(plugins_dir(), BACKENDS)
+
 
 def load_setup(
-    config: Config, credentials: Credentials, factories: Mapping[str, Factory] = FACTORIES
+    config: Config,
+    credentials: Credentials,
+    factories: Mapping[str, Factory] = FACTORIES,
+    plugins: Plugins = NO_PLUGINS,
 ) -> Setup:
     backends: dict[str, Backend] = {}
-    unavailable: dict[str, str] = {}
-    for name, create in factories.items():
+    unavailable: dict[str, BackendUnavailable] = {}
+    for name, create in {**factories, **plugins.factories()}.items():
         try:
             backends[name] = create(config, credentials)
         except BackendUnavailable as exc:
-            unavailable[name] = exc.message
+            unavailable[name] = exc
+    for name in config.backends.plugins:
+        if name not in backends and name not in unavailable:
+            log.warning("config: [backends.%s] names no backend; ignored", name)
     default = config.backends.default
     if default in backends and isinstance(backends[default], FileBackend):
         log.warning("default backend %s takes transcribe sessions only; ignoring it", default)
@@ -73,7 +127,7 @@ def load_setup(
         default = None
     if default is None:
         default = next((n for n, b in backends.items() if not isinstance(b, FileBackend)), None)
-    return Setup(config, backends, unavailable, default)
+    return Setup(config, backends, unavailable, default, plugins.failed)
 
 
 def kinds_of(backend: Backend) -> tuple[SessionKind, ...]:
@@ -162,7 +216,7 @@ def _backend(setup: Setup, requested: str | None, kind: SessionKind) -> Backend:
         return backend
     ready = ", ".join(setup.backends)
     if name in setup.unavailable:
-        reason = setup.unavailable[name]
+        reason = setup.unavailable[name].message
         message = f"{name} is not set up: {reason}; or use one that is: {ready}"
     else:
         message = f"there is no backend named {name!r}; the backends set up here: {ready}"

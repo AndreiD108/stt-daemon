@@ -7,14 +7,11 @@ in a worker thread. Beam search; a session's keyterms go in as hotwords on each 
 from __future__ import annotations
 
 import asyncio
-import collections
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Self
-
-import numpy as np
 
 from ..audio.frames import Samples
 from ..config import Config, ParakeetConfig, data_dir
@@ -24,17 +21,14 @@ from .base import (
     Backend,
     BackendUnavailable,
     Capabilities,
-    Closed,
     CommitPolicy,
-    Committed,
-    Connection,
     EventSink,
-    Failed,
     OpenFailed,
     OpenOptions,
     Word,
     merge_keyterms,
 )
+from .chunked import Chunk, ChunkedConnection, Transcribed, Turns
 
 log = logging.getLogger(__name__)
 
@@ -47,9 +41,6 @@ ENCODER, DECODER, JOINER, TOKENS, BPE_VOCAB = (
     "bpe.vocab",
 )
 MODEL_FILES = (ENCODER, DECODER, JOINER, TOKENS, BPE_VOCAB)
-# Shorter audio has no feature frames, and the encoder raises on it.
-_MIN_DECODE_SAMPLES = SAMPLE_RATE // 10
-
 CAPABILITIES = Capabilities(
     languages=("auto",),
     word_timestamps=True,
@@ -110,40 +101,6 @@ def _decode(recognizer: Any, audio: Samples, hotwords: str | None) -> Decoded:
     return Decoded(
         result.text, list(result.tokens), list(result.timestamps), list(result.durations)
     )
-
-
-class Turns:
-    """One holder at a time; waiters marked `first` get the next turn before the others."""
-
-    def __init__(self) -> None:
-        self._busy = False
-        self._first: collections.deque[asyncio.Future[None]] = collections.deque()
-        self._rest: collections.deque[asyncio.Future[None]] = collections.deque()
-
-    async def acquire(self, *, first: bool) -> None:
-        if not self._busy:
-            self._busy = True
-            return
-        turn: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        line = self._first if first else self._rest
-        line.append(turn)
-        try:
-            await turn
-        except asyncio.CancelledError:
-            if turn.done() and not turn.cancelled():
-                self.release()  # given the turn as the caller was cancelled: pass it on
-            elif turn in line:
-                line.remove(turn)
-            raise
-
-    def release(self) -> None:
-        for line in (self._first, self._rest):
-            while line:
-                turn = line.popleft()
-                if not turn.done():
-                    turn.set_result(None)
-                    return
-        self._busy = False
 
 
 class Engine:
@@ -355,15 +312,7 @@ class ParakeetBackend(Backend):
         )
 
 
-@dataclass(frozen=True)
-class _Pending:
-    commit_id: int
-    audio: Samples
-    start_s: float
-    end_s: float
-
-
-class ParakeetConnection(Connection):
+class ParakeetConnection(ChunkedConnection):
     def __init__(
         self,
         connection_id: int,
@@ -374,90 +323,12 @@ class ParakeetConnection(Connection):
         on_end: Callable[[], None] | None = None,
     ) -> None:
         """`ready` raises OpenFailed when the model can't load; `on_end` is called once."""
-        super().__init__(connection_id)
-        self._sink = sink
-        self._decode = decode
-        self._ready = ready
-        self._on_end = on_end
-        self._chunks: list[Samples] = []
-        self._sent_samples = 0
-        self._committed_samples = 0
-        self._commits = 0
-        self._pending: collections.deque[_Pending] = collections.deque()
-        self._has_pending = asyncio.Event()
-        self._ended = False
-        self._worker = asyncio.create_task(self._decode_commits())
 
-    async def send_audio(self, samples: Samples) -> None:
-        if self._ended:
-            return
-        self._chunks.append(np.asarray(samples, np.float32).copy())
-        self._sent_samples += len(samples)
-
-    async def commit(self) -> int:
-        self._commits += 1
-        if self._ended:
-            return self._commits
-        audio = np.concatenate(self._chunks) if self._chunks else np.zeros(0, np.float32)
-        self._chunks = []
-        start, end = self._committed_samples, self._sent_samples
-        self._committed_samples = end
-        self._pending.append(_Pending(self._commits, audio, start / SAMPLE_RATE, end / SAMPLE_RATE))
-        self._has_pending.set()
-        return self._commits
-
-    async def close(self) -> None:
-        self._end(None)
-
-    async def _decode_commits(self) -> None:
-        if self._ready is not None:
-            try:
-                await self._ready()
-            except OpenFailed as exc:
-                self._end(Failed(self.connection_id, exc.code, exc.message, exc.retryable))
-                return
-        while True:
-            await self._has_pending.wait()
-            self._has_pending.clear()
-            while self._pending:
-                pending = self._pending[0]
-                try:
-                    event = await self._transcribe(pending)
-                except Exception as exc:
-                    log.exception(
-                        "Parakeet failed to decode %.1f s", len(pending.audio) / SAMPLE_RATE
-                    )
-                    self._end(
-                        Failed(
-                            self.connection_id,
-                            "backend_error",
-                            f"decoding failed: {exc}",
-                            retryable=False,
-                        )
-                    )
-                    return
-                self._pending.popleft()
-                self._sink(event)
-
-    async def _transcribe(self, pending: _Pending) -> Committed:
-        if len(pending.audio) < _MIN_DECODE_SAMPLES:
-            text, words = "", ()
-        else:
-            decoded = await self._decode(pending.audio)
+        async def transcribe(chunk: Chunk) -> Transcribed:
+            decoded = await decode(chunk.audio)
             text = decoded.text.strip()
-            words = group_words(decoded, pending.start_s) if text else ()
-        return Committed(self.connection_id, pending.commit_id, text, None, words, pending.end_s)
+            return Transcribed(text, group_words(decoded, chunk.start_s) if text else ())
 
-    def _end(self, failure: Failed | None) -> None:
-        if self._ended:
-            return
-        self._ended = True
-        self._pending.clear()
-        self._chunks = []
-        if asyncio.current_task() is not self._worker:
-            self._worker.cancel()
-        if self._on_end is not None:
-            self._on_end()
-        if failure is not None:
-            self._sink(failure)
-        self._sink(Closed(self.connection_id))
+        super().__init__(
+            connection_id, sink, transcribe, label="Parakeet", ready=ready, on_end=on_end
+        )

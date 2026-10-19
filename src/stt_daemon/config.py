@@ -113,6 +113,10 @@ class BackendsConfig:
         default_factory=ElevenLabsBatchConfig, metadata={"key": "elevenlabs-batch"}
     )
     parakeet: ParakeetConfig = field(default_factory=ParakeetConfig)
+    plugins: dict[str, dict[str, Any]] = field(
+        default_factory=dict[str, dict[str, Any]], metadata={"extra": True}
+    )
+    """The other `[backends.<name>]` tables, as read; plugin backends take theirs."""
 
 
 @dataclass
@@ -193,15 +197,23 @@ def load_config(path: Path | None = None) -> Config:
 
 def _build[T: DataclassInstance](cls: type[T], raw: dict[str, Any], prefix: str, path: Path) -> T:
     hints = typing.get_type_hints(cls)
-    keys = {f.metadata.get("key", f.name): f.name for f in dataclasses.fields(cls)}
+    fields = dataclasses.fields(cls)
+    keys = {f.metadata.get("key", f.name): f.name for f in fields if not f.metadata.get("extra")}
+    # An `extra` field takes the tables no other field names.
+    extra = next((f.name for f in fields if f.metadata.get("extra")), None)
+    tables: dict[str, Any] = {
+        k: v for k, v in raw.items() if k not in keys and extra and isinstance(v, dict)
+    }
     for key in raw:
-        if key not in keys:
+        if key not in keys and key not in tables:
             log.warning("%s: unknown key %s%s, ignored", path, prefix, key)
     values = {
         name: _convert(hints[name], raw[key], f"{prefix}{key}", path)
         for key, name in keys.items()
         if key in raw
     }
+    if extra:
+        values[extra] = tables
     return cls(**values)
 
 

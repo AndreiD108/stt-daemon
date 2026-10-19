@@ -55,6 +55,8 @@ class Committed:
     """None when the backend has no word times; empty when there were no words."""
     audio_end_s: float
     """Covers all audio sent before this point, back to the previous `Committed`."""
+    speakers: tuple[str | None, ...] | None = None
+    """With `words` None: each whitespace-split word's speaker, kept when times are estimated."""
 
 
 @dataclass(frozen=True)
@@ -120,12 +122,14 @@ class OpenOptions:
 
 
 class BackendUnavailable(Exception):
-    """The backend is not set up on this machine (no key, no model)."""
+    """The backend is not set up on this machine (no key, no model), or its plugin failed."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, *, detail: str | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.detail = detail
+        """A plugin failure's traceback, for the daemon's log."""
 
 
 class OpenFailed(Exception):
@@ -154,7 +158,7 @@ class Connection(ABC):
 
 
 class Backend(ABC):
-    name: ClassVar[str]
+    name: str
     takes_key: ClassVar[bool] = False
     """Set up with `stt-daemon key set <name>`."""
     capabilities: Capabilities

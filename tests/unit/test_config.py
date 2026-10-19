@@ -101,6 +101,18 @@ def test_unknown_keys_warn_and_load(tmp_path: Path, caplog: pytest.LogCaptureFix
     assert "extra" in caplog.text
 
 
+def test_other_backend_tables_are_kept_for_plugins(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('[backends]\nlimit = 3\n[backends.openai]\nmodel = "whisper-1"\n')
+    with caplog.at_level(logging.WARNING):
+        config = load_config(path)
+    assert config.backends.plugins == {"openai": {"model": "whisper-1"}}
+    assert "backends.limit" in caplog.text
+    assert "openai" not in caplog.text
+
+
 def test_out_of_range_value_fails(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
     path.write_text("[audio]\nbuffer_ms = 500\npre_start_ms = 1000\n")

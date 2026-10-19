@@ -262,6 +262,8 @@ class Server(Starts):
                 await self._end(conn, message)
             case "reload":
                 self._reload(conn, message)
+            case "backends_status":
+                conn.send("backends_status", self.setup.status_wire(), message.id)
             case "hello":
                 raise RequestError("bad_request", "hello was already sent on this connection")
             case kind:

@@ -11,7 +11,7 @@ from .audio.capture import CaptureSource, MicCapture
 from .backends import parakeet
 from .config import Config, ConfigError, load_config, socket_path
 from .credentials import CredentialsError, load_credentials
-from .server.backend_set import Setup, load_setup
+from .server.backend_set import Setup, installed_plugins, load_setup
 from .server.connection import SocketInUse
 from .server.socket import Server
 
@@ -54,7 +54,8 @@ def reload(
     fresh = load_config(config_file)
     if fresh.audio != started.audio or fresh.slot != started.slot:
         log.warning("changes to [audio] and [slot] take effect when the daemon restarts")
-    setup = load_setup(fresh, load_credentials(stdin_keys))
+    setup = load_setup(fresh, load_credentials(stdin_keys), plugins=installed_plugins())
+    setup.log_failures()
     if parakeet.ParakeetBackend.name not in setup.backends:
         parakeet.ENGINE.unload_when_idle()
     return setup
@@ -64,13 +65,14 @@ def run(stdin_keys: Mapping[str, str] | None = None, *, config_file: Path | None
     """`stt-daemon run`; `stdin_keys` are API keys read at startup, kept until restart."""
     try:
         config = load_config(config_file)
-        setup = load_setup(config, load_credentials(stdin_keys))
+        setup = load_setup(config, load_credentials(stdin_keys), plugins=installed_plugins())
     except (ConfigError, CredentialsError) as exc:
         print(f"stt-daemon: {exc}", file=sys.stderr)
         return 1
     logging.basicConfig(
         level=config.logging.level, stream=sys.stderr, format="%(levelname)s %(name)s: %(message)s"
     )
+    setup.log_failures()
 
     def reload_setup() -> Setup:
         return reload(config, config_file, stdin_keys)

@@ -5,6 +5,7 @@ import shutil
 import sys
 from collections.abc import Mapping
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from stt_daemon import __version__, control
 from stt_daemon.backends import BACKENDS
@@ -13,6 +14,7 @@ from stt_daemon.backends.install import CREDIT, InstallError, install_parakeet
 from stt_daemon.backends.parakeet import model_dir
 from stt_daemon.config import (
     ConfigError,
+    data_dir,
     load_config,
     remove_config_key,
     set_config_string,
@@ -28,6 +30,9 @@ from stt_daemon.service.common import ServiceError, daemon_executable, run_comma
 from stt_daemon.service.launchd import Launchd
 from stt_daemon.service.preflight import check_pipewire_aec, check_portaudio, check_tool
 from stt_daemon.service.systemd import Systemd
+
+if TYPE_CHECKING:
+    from stt_daemon.server.backend_set import Setup
 
 KEY_BACKENDS = [name for name, cls in BACKENDS.items() if cls.takes_key]
 
@@ -51,6 +56,8 @@ def main(argv: list[str] | None = None) -> int:
                 return _install(args.backend)
             case "backend" if args.action == "remove":
                 return _remove(args.backend)
+            case "backend" if args.action == "list":
+                return _list()
             case "backend":
                 return _set_default(args.backend)
             case "listen":
@@ -99,20 +106,21 @@ def _parser() -> argparse.ArgumentParser:
     key_set = key_actions.add_parser(
         "set", help="store a backend's API key (read from stdin) and tell the daemon"
     )
-    key_set.add_argument("backend", choices=KEY_BACKENDS)
+    key_set.add_argument("backend", help=f"{', '.join(KEY_BACKENDS)} or a plugin's name")
 
     backend = commands.add_parser("backend", help="transcription backends")
     backend_actions = backend.add_subparsers(dest="action", required=True)
     default = backend_actions.add_parser("set-default", help="the backend sessions use by default")
-    default.add_argument("backend", choices=list(BACKENDS))
+    default.add_argument("backend")
     install = backend_actions.add_parser(
         "install", help="download a local backend's model and tell the daemon"
     )
-    install.add_argument("backend", choices=["parakeet"])
+    install.add_argument("backend", help="parakeet or a plugin's name")
     remove = backend_actions.add_parser(
         "remove", help="delete a local backend's model and tell the daemon"
     )
     remove.add_argument("backend", choices=["parakeet"])
+    backend_actions.add_parser("list", help="every backend, its status, and the default")
 
     listen = commands.add_parser("listen", help="start a session and print what it hears")
     listen.add_argument("--backend", help="default: the daemon's default backend")
@@ -200,11 +208,15 @@ def _service(args: argparse.Namespace) -> int:
     return 0
 
 
-def _effective_default() -> str | None:
-    """The default backend the daemon would pick now."""
-    from stt_daemon.server.backend_set import load_setup
+def _setup() -> "Setup":
+    """What the daemon would set up now, plugins included."""
+    from stt_daemon.server.backend_set import installed_plugins, load_setup
 
-    return load_setup(load_config(), load_credentials()).default
+    return load_setup(load_config(), load_credentials(), plugins=installed_plugins())
+
+
+def _effective_default() -> str | None:
+    return _setup().default
 
 
 def _pin_default(before: str | None, added: str) -> None:
@@ -217,6 +229,12 @@ def _pin_default(before: str | None, added: str) -> None:
 
 
 def _key_set(backend: str) -> int:
+    if backend not in KEY_BACKENDS:
+        from stt_daemon.server.backend_set import installed_plugins
+
+        if backend not in installed_plugins().classes:
+            names = ", ".join(KEY_BACKENDS)
+            return _fail(f"no backend named {backend!r} takes a key: {names}, or a plugin's name")
     before = _effective_default()
     if sys.stdin.isatty():
         key = getpass.getpass(f"{backend} API key (not shown): ")
@@ -230,10 +248,39 @@ def _key_set(backend: str) -> int:
 
 def _install(backend: str) -> int:
     before = _effective_default()
-    path, installed = install_parakeet()
-    print(f"{backend} {'is installed in' if installed else 'was already in'} {path} ({CREDIT})")
+    if backend == "parakeet":
+        path, installed = install_parakeet()
+        print(f"{backend} {'is installed in' if installed else 'was already in'} {path} ({CREDIT})")
+    elif (problem := _install_plugin(backend)) is not None:
+        return _fail(problem)
     _pin_default(before, backend)
     return _reload_daemon()
+
+
+def _install_plugin(backend: str) -> str | None:
+    """Runs a plugin's `install`; the problem, if any."""
+    from stt_daemon.backends.plugins import error_line, has_install
+    from stt_daemon.server.backend_set import installed_plugins
+
+    cls = installed_plugins().classes.get(backend)
+    if cls is None:
+        return f"no backend named {backend!r} to install: parakeet, or a plugin's name"
+    if not has_install(cls):
+        return f"{backend} has nothing to install"
+    instance = cls()
+    target = data_dir() / "models" / backend
+    key = load_credentials().get(backend)
+    try:
+        instance.setup(key, load_config().backends.plugins.get(backend, {}))
+        target.mkdir(parents=True, exist_ok=True)
+        asyncio.run(instance.install(target))
+        ready = instance.available()
+    except Exception as exc:
+        return f"{backend} failed to install: {error_line(exc, key)}"
+    if not ready:
+        return f"{backend} still reports itself not installed"
+    print(f"{backend} is installed in {target}")
+    return None
 
 
 def _remove(backend: str) -> int:
@@ -242,9 +289,9 @@ def _remove(backend: str) -> int:
         return _fail(f"{backend} is not installed: there is no model in {model}")
     config = load_config()
     if config.backends.default == backend:
-        from stt_daemon.server.backend_set import kinds_of, load_setup
+        from stt_daemon.server.backend_set import kinds_of
 
-        setup = load_setup(config, load_credentials())
+        setup = _setup()
         others = (n for n, b in setup.backends.items() if n != backend and "mic" in kinds_of(b))
         if (other := next(others, None)) is not None:
             set_config_string("backends", "default", other)
@@ -258,20 +305,41 @@ def _remove(backend: str) -> int:
 
 
 def _set_default(backend: str) -> int:
-    from stt_daemon.server.backend_set import load_setup
-
-    setup = load_setup(load_config(), load_credentials())
+    setup = _setup()
     if backend not in setup.backends:
-        reason = setup.unavailable.get(backend, "not set up")
-        return _fail(f"{backend} is not set up: {reason}")
-    if issubclass(cls := BACKENDS[backend], FileBackend):
+        problem = setup.unavailable.get(backend)
+        if problem is None:
+            names = ", ".join([*setup.backends, *setup.unavailable])
+            return _fail(f"there is no backend named {backend!r}; the backends: {names}")
+        return _fail(f"{backend} is not set up: {problem.message}")
+    if isinstance(chosen := setup.backends[backend], FileBackend):
         return _fail(
             f"{backend} takes transcribe sessions only, so it can't be the default; "
-            f"with {cls.default_for} as the default, transcribe uses {backend}"
+            f"with {chosen.default_for} as the default, transcribe uses {backend}"
         )
     set_config_string("backends", "default", backend)
     print(f"{backend} is the default backend")
     return _reload_daemon()
+
+
+def _list() -> int:
+    data: control.Msg
+    try:
+        data = control.request("backends_status")
+        running = True
+    except control.NotRunning:
+        data, running = _setup().status_wire(), False
+    except (control.DaemonError, OSError) as exc:
+        return _fail(f"could not ask the daemon at {socket_path()}: {exc}")
+    rows = [
+        (b["name"], b["status"] + (", default" if b["default"] else "")) for b in data["backends"]
+    ] + [(f["file"], f["status"]) for f in data["failed_files"]]
+    width = max((len(name) for name, _ in rows), default=0)
+    for name, status in rows:
+        print(f"{name:<{width}}  {status}")
+    if not running:
+        print("(the daemon is not running; this is what it would set up)")
+    return 0
 
 
 def _reload_daemon() -> int:

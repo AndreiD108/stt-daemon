@@ -50,6 +50,8 @@ socket and ask for a session; one session runs at a time. Two backends:
 Files also go to **ElevenLabs Scribe v2** as one upload (`elevenlabs-batch`, same key), which can
 tell speakers apart.
 
+Other backends are plugins: one Python file each, see [docs/plugins.md](docs/plugins.md).
+
 ![The same sentence through ElevenLabs in the cloud and through Parakeet on the CPU](docs/media/backends.gif)
 
 ## Install

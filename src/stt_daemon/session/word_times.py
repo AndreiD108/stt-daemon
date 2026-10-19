@@ -71,8 +71,12 @@ def with_times(event: Committed, frames: list[Frame], speech: Speech, offset: in
     spans = speech_spans([(f.start, f.samples.size) for f in frames], speech, rate)
     times = estimate(texts, np.concatenate([f.samples for f in frames]), spans, rate)
     base = offset / rate
-    words = tuple(Word(t, base + s, base + e) for t, (s, e) in zip(texts, times, strict=True))
-    return replace(event, words=words)
+    speakers = event.speakers if event.speakers and len(event.speakers) == len(texts) else None
+    words = tuple(
+        Word(t, base + s, base + e, speakers[i] if speakers else None)
+        for i, (t, (s, e)) in enumerate(zip(texts, times, strict=True))
+    )
+    return replace(event, words=words, speakers=None)
 
 
 def speech_spans(pieces: Iterable[tuple[float, int]], speech: Speech, rate: int) -> list[Span]:

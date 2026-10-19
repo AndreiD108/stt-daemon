@@ -137,7 +137,7 @@ async def test_a_decode_error_fails_the_connection_once() -> None:
     await conn.commit()
     await _settle()
     assert events == [
-        Failed(2, "backend_error", "decoding failed: bad shape", retryable=False),
+        Failed(2, "backend_error", "Parakeet failed: bad shape", retryable=False),
         Closed(2),
     ]
     await conn.send_audio(_audio(1.0))

@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -134,6 +136,17 @@ def test_estimated_times_count_from_the_connection_start() -> None:
     frames = [Frame(tone(1.0), 11.0, RATE)]
     event = with_times(committed("one two", None), frames, log.between, 32000)
     assert event.words == (Word("one", 2.0, 2.5), Word("two", 2.5, 3.0))
+
+
+def test_estimated_words_keep_the_speakers_given_with_the_text() -> None:
+    log = SpeechLog()
+    log.started(0.0)
+    log.ended(1.0)
+    frames = [Frame(tone(1.0), 1.0, RATE)]
+    event = replace(committed("one two", None), speakers=("speaker_0", "speaker_1"))
+    words = with_times(event, frames, log.between, 0).words
+    assert words is not None
+    assert [w.speaker for w in words] == ["speaker_0", "speaker_1"]
 
 
 def test_text_with_an_empty_word_list_gets_times() -> None:
