@@ -65,7 +65,7 @@ def install_parakeet(
 def write_bpe_vocab(tokens: Path, out: Path) -> None:
     """sherpa needs a sentencepiece vocab to turn hotwords into tokens; the export ships none.
 
-    Experimental: the score is minus the token id, so lower ids win where pieces compete."""
+    The score is minus the token id, so lower ids win where pieces compete."""
     lines: list[str] = []
     for n, line in enumerate(tokens.read_text(encoding="utf-8").splitlines(), start=1):
         piece, _, token_id = line.rpartition(" ")

@@ -42,7 +42,7 @@ and you're good to go.
 The daemon runs as a user service and holds the mic, with recent audio in a
 buffer, so nothing gets chopped off the start of what you say. You can turn
 that off and have the mic open only when transcribing. Apps connect over a Unix
-socket and ask for a session; one session runs at a time. Two backends:
+socket and ask for a session; one dictation runs at a time. Two backends:
 
 - **ElevenLabs Scribe v2 Realtime**, in the cloud. Needs an API key.
 - **Parakeet TDT 0.6B v3**, local. Runs on the CPU.
@@ -50,7 +50,7 @@ socket and ask for a session; one session runs at a time. Two backends:
 Files also go to **ElevenLabs Scribe v2** as one upload (`elevenlabs-batch`, same key), which can
 tell speakers apart.
 
-Other backends are plugins: one Python file each, see [docs/plugins.md](docs/plugins.md).
+Any other backend is a plugin you can [write yourself](#write-your-own-backend).
 
 ![The same sentence through ElevenLabs in the cloud and through Parakeet on the CPU](docs/media/backends.gif)
 
@@ -73,7 +73,8 @@ stt-daemon backend install parakeet    # local: downloads the model, 487 MB
 
 One is enough. The first one you set up becomes the default;
 `stt-daemon backend set-default parakeet` changes it, and
-`stt-daemon backend remove parakeet` deletes the model again. Keys live in
+`stt-daemon backend remove parakeet` deletes the model again. `stt-daemon backend list` shows
+each backend, whether it is ready, and the default. Keys live in
 `~/.config/stt-daemon/credentials.toml`, readable by you only. Then:
 
 ```sh
@@ -102,17 +103,27 @@ A client can transcribe what your machine plays, a call or a video, with
 out as one transcript, each line marked `[system]` or `[mic]`. It runs next to your dictation and
 takes no mic slot. The mic track has echo cancellation, so speakers are fine.
 
-- **Linux**: it needs `pw-record`, from your distribution's PipeWire tools;
-  `stt-daemon service install` names the package when it is missing.
+- **Linux**: it needs `pw-record`, `pw-dump` and `pw-cli`, from your distribution's PipeWire
+  tools, and PipeWire's echo-cancel module for the mic track; `stt-daemon service install` names
+  the packages that are missing.
 - **macOS** (14.2 or later): it needs [`audiotee`](https://github.com/makeusabrew/audiotee) on
   your `PATH` when you run `stt-daemon service install` (the agent keeps that `PATH`); build it
-  with `swift build -c release`. The first session makes macOS ask for the
-  System Audio Recording permission for `stt-daemon`; allow it once.
+  with `swift build -c release`. If you install it later, run `stt-daemon service install`
+  again. The first session makes macOS ask for the System Audio Recording permission for
+  `stt-daemon`; allow it once.
 
 To take one application's audio only, say the call app and not the music next to it, a client
 picks it from the sources the daemon lists (every app that plays audio, with its name) and starts
 the session with that app's id. When the app stops playing and starts again, the session picks
 it up again on its own.
+
+## Write your own backend
+
+A backend plugin is one Python file in `~/.config/stt-daemon/backends/`. It implements one call,
+`transcribe`: 16 kHz audio in, text out, with or without word times. The daemon does the rest:
+dictation, files and meetings, markers, estimated word times, keys and the default. Clients pick
+it by its name, and `stt-daemon backend list` shows whether it loaded. The contract and a complete
+example for any OpenAI-compatible endpoint are in [docs/plugins.md](docs/plugins.md).
 
 ## Update
 

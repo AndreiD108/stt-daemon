@@ -24,9 +24,9 @@ test_capture.py       device choice, holds, callback, stall/status recovery, bac
 test_wav_capture.py   WAV reading, real-time pacing, per-session open
 test_pw_capture.py    system capture with a stand-in: frames, lost/restored, backoff, stall, release, following an app
 test_sources.py       pw-dump parsing on the recording, ids, scan restarts, following an app's next stream, nodes by name
-test_sources_macos.py  macOS scan on a stand-in Core Audio: names, ids, listener, polling, read failures, follow by bundle id; scan per platform
+test_sources_macos.py  macOS scan on a stand-in Core Audio: names, ids, listener, polling, read failures, follow by bundle id, scan per OS
 test_audiotee_capture.py  audiotee with a stand-in: command, frames, permission hint, exit error, quiet process kept, new pid followed
-test_aec.py           built-in canceller on synthetic echo: echo drop, near-end kept, delay estimate and change over the search range, bypass, CPU; Parakeet (slow)
+test_aec.py           built-in canceller on synthetic echo: echo drop, near end kept, delay search and changes, bypass, CPU; Parakeet (slow)
 test_aec_builtin.py   built-in canceller as mic track: late-stamped far frames, far gap and restart, mic jump, settle at stop
 test_aec_pipewire.py  echo-cancel module via a pw-cli stand-in: node wait, load errors, kill, plain-mic fallback; mode; install check
 test_stream_capture.py  byte stream with a stand-in decoder: order, audio-time stamps, failures, backpressure

@@ -1,7 +1,8 @@
 # stt-daemon
 
 A local speech-to-text daemon in Python: one process owns the mic, many clients connect over a Unix
-socket, and one session runs at a time. The wire protocol is in `docs/protocol.md`; code against it.
+socket. One mic session runs at a time; file (`transcribe`) and system-audio sessions run next to
+it on backend slots. The wire protocol is in `docs/protocol.md`; code against it.
 
 ## Scope
 
@@ -29,7 +30,7 @@ src/                      package source
       capture.py          CaptureSource base (keep-open vs per-session holds), MicCapture: PortAudio (loaded on first use), watchdog
       wav_capture.py      WavCapture: WAV files in real time, silence between; mic stand-in for tests
       stream_capture.py   ByteStreamCapture: client bytes via ffmpeg (or raw PCM) → frames on audio time, bounded queue
-      system_capture.py   SystemCapture: a capture subprocess's s16 stdout → frames; stall/exit loss, restarts, re-attach, moves to an app's new stream
+      system_capture.py   SystemCapture: a capture subprocess's s16 stdout → frames; stall/exit loss, restarts, re-attach, follows an app
       pw_capture.py       PwRecordCapture: pw-record on the default output's monitor or one app's stream (Linux)
       audiotee_capture.py  AudioteeCapture: audiotee on all output or one pid (macOS); permission hint on silence, its JSON error on exit
       aec.py              EchoCanceller: NumPy AEC per 10 ms block; GCC-PHAT delay, PBFDAF filter pair, double-talk guard, residual gain
@@ -57,11 +58,11 @@ src/                      package source
       wire.py             session and VAD events → protocol event data (words, after_word only when asked)
       backend_set.py      Setup: backends set up here (plugins too), default, statuses, failure log; resolve a start (language, features, hints)
       starts.py           Starts mixin: start_session, transcribe, start_system_session → sessions; start errors as replies
-      slot.py             Slot: mic slot idle/busy/evictable, takeover order, backend-only (transcribe) starts, slot changes
+      slot.py             Slot: mic slot idle/busy/evictable, takeover order, backend-only starts, dictation suspends / resumes, slot changes
       slot_state.py       Client, Holder, SlotState (wire form), StartRefused (busy / session_active details)
       backend_slots.py    BackendSlots: per-backend max_sessions, the sessions holding them, suspended ones
       speech.py           SpeechWatch: daemon-wide VAD on all mic audio; VAD events, speech starts by id
-      sources.py          SourceScan base (events, waits, Follow: one app's next stream), PwDumpScan: pw-dump -m → sources, nodes by name; default_scan
+      sources.py          SourceScan base (events, waits, Follow: an app's next stream); PwDumpScan: pw-dump -m → sources, nodes; default_scan
       sources_macos.py    CoreAudioScan: Core Audio process list (polled + listener, PyObjC) → sources by pid, bundle id as binary
       peer.py             socket peer's pid and cmdline: SO_PEERCRED + /proc; macOS LOCAL_PEERPID + KERN_PROCARGS2
     session/              one session: capture → VAD → pause cutting → backend → segments
@@ -70,7 +71,7 @@ src/                      package source
       tracks.py           Track: one source's VAD → pause gate → link, commit cadence (wall or audio time), audio loop
       upload.py           UploadSession: transcribe on a file backend; bytes kept, one upload at stop, no progress
       options.py          SessionOptions, MarkerRefused, start_point (where a started session takes its audio from)
-      recovery.py         Link: unanswered-audio log, in-order sends, rollover, reconnect, paced replay, suspend / resume, times for text-only answers
+      recovery.py         Link: unanswered-audio log, in-order sends, rollover, reconnect, paced replay, suspend / resume, text-only word times
       link_log.py         the link's log items: audio (int16 while suspended), commit points
       segments.py         backend answers → segments: session times via timeline, markers placed, leftover markers
       moving.py           while_moving: wait bounded by no progress, paused time not counted
@@ -86,7 +87,7 @@ src/                      package source
       common.py           Runner (injectable for tests), ServiceError, the installed stt-daemon script's path
       systemd.py          unit and limits.conf rendering, ExecStart escaping; install/remove/status/logs
       launchd.py          macOS agent plist (TMPDIR and PATH kept); launchctl calls
-      preflight.py        PortAudio load check, tools on PATH (ffmpeg, pw-record, pw-dump, pw-cli, audiotee), echo-cancel module files; install command per distro
+      preflight.py        PortAudio check, tools on PATH (ffmpeg, pw-*, audiotee), echo-cancel module files; install command per distro
     plugin.py             public plugin contract: Backend, Capabilities, Options, Result, Word
     cli.py                `stt-daemon` entry point: run, service, key set, backend set-default/install/remove/list, listen, transcribe
     control.py            one blocking request to the running daemon (hello, command, reply); `reload` after key set
@@ -123,19 +124,19 @@ tests/
     test_daemon_lifecycle.py  socket file, shutdown, context store, marker times
     test_daemon_speech.py     VAD event routing, speech_id starts (edge, expiry, mic closed, eviction)
     test_daemon_transcribe.py transcribe: ffmpeg and raw PCM, file-time word times, slots beside mic, decoder errors
-    test_daemon_plugins.py    example plugin on a local HTTP stand-in: dictation with estimated times and a marker, transcribe, API error, key set + reload
+    test_daemon_plugins.py    example plugin on a local HTTP stand-in: dictation (estimated times, marker), transcribe, API error, key set + reload
     test_daemon_batch.py      elevenlabs-batch over the socket: default rule, speakers, refusals, markers, disconnect
     test_daemon_priority.py   transcribe suspended by a dictation: same output as unsuspended; blocked writer stalls no one
-    test_daemon_system.py     system sessions on pw-record and audiotee stand-ins: two tracks, dictation alongside, suspend/resume, fatal track, tool missing, pid
+    test_daemon_system.py     system sessions on pw-record/audiotee stand-ins: two tracks, dictation beside, suspend/resume, fatal track, no tool, pid
     test_daemon_sources.py    sources in welcome and events (opt-in), app sessions, unknown app, re-attach (also while suspended)
-    test_daemon_aec.py        mic track on the echo-cancelled source; no module → plain mic, one aec_unavailable; pw-cli ending mid-session; built-in canceller keeps echo out
+    test_daemon_aec.py        mic track on the echo-cancelled source; no module → plain mic, one aec_unavailable; pw-cli exit; built-in AEC
     test_cli_daemon.py        key set reloads the daemon; listen prints segments, exit codes
     test_parakeet_daemon.py   `slow`, real model: commits at pauses, word times at speech edges, estimate vs real times, keyterms, two tracks
   live/                   opt-in (`pytest -m live`): real mic, real backend key
     test_elevenlabs_live.py  fixture to real EL: word times at the speech edges (realtime and upload), bad key
     test_aec_live.py      fixture through the speakers: cleaned source ≥ 10 dB below the mic; off / module / built-in side by side while you read
 pyproject.toml            package, deps, ruff/pyright/pytest settings
-README.md                 public README: pitch, client features, install, backends
+README.md                 public README: pitch, client features, install, backends, files, meetings, plugins
 ```
 <!-- END FILE TREE -->
 
@@ -177,12 +178,21 @@ The recovery log (`session/recovery.py`) keeps every audio frame and commit that
 answered; a commit's answer trims it. After a reconnect the new connection gets the whole log
 first. Trimming on send instead of on answer loses audio when a connection fails.
 
-## Parakeet's `bpe.vocab` is generated and unverified
+## Parakeet's `bpe.vocab` is generated
 
 sherpa-onnx's Parakeet export has no `bpe.vocab`, which hotword decoding needs.
-`backends/install.py` writes one from `tokens.txt`, score = minus the token id. This is a
-workaround checked only on TTS clips, not against the real SentencePiece scores. Tokens that
-start a word begin with a space, not `▁`.
+`backends/install.py` writes one from `tokens.txt`, score = minus the token id, not the real
+SentencePiece scores. Tokens that start a word begin with a space, not `▁`.
+
+## PipeWire and Core Audio
+
+- `pw-dump -m` prints JSON arrays back to back, not one per line; `ArraySplitter` cuts them by
+  bracket depth. Registry ids are reused, `object.serial` is not: sources and `pw-record
+  --target` go by serial.
+- The echo-cancel module lives as long as its `pw-cli -m load-module` process; ending `pw-cli`
+  unloads it. A session's end must end that process (TERM, then KILL).
+- PyObjC is a darwin-only dependency. Import `CoreAudio`, `objc` and `AppKit` inside functions,
+  after the `sys.platform` check, never at module level.
 
 ## Local commit hooks
 

@@ -1,32 +1,9 @@
 # stt-daemon protocol
 
-One daemon owns the mic; many clients connect; one mic session runs at a time. The mic slot (the
-slot) is the right to run that session: a client takes it with `start_session` and gives it back
-when its session ends. Each backend also has slots: a session takes one on its backend, and a
-backend runs at most `max_sessions` sessions at once (config `backends.<name>.max_sessions`,
-default 2). Capacity counts sessions, not clients.
-
-Sessions come in three kinds:
-
-- `mic` (`start_session`): transcribes the daemon's mic. It takes the mic slot and one backend
-  slot.
-- `system` (`start_system_session`): transcribes what the machine plays and, if asked, the mic
-  as a second track. It takes one backend slot and no mic slot, so it runs next to a mic session
-  and is never evictable. Linux and macOS (14.2 or later).
-- `transcribe` (`transcribe`): transcribes audio bytes the client sends, a file in any format
-  ffmpeg reads, or raw PCM. It takes one backend slot and no mic slot, so it runs next to a mic
-  session and is never evictable. It runs as fast as the audio arrives.
-
-A backend takes the kinds in its `kinds` in `welcome`. `elevenlabs-batch` takes `transcribe` only.
-
-Dictation comes first. When a `start_session` finds its backend full and a session of another kind
-holds a slot there, the daemon suspends that session instead of refusing the start: a `transcribe`
-session before a `system` one, then the most recently started. A suspended session loses nothing.
-It drops its backend connection and keeps its audio; when a slot on its backend frees, it resumes
-and the backend gets the kept audio, longest suspended first. Its client gets `session_suspended` and
-`session_resumed`. Only a `mic` session suspends, and never another `mic` session; those starts
-get `busy`. On Parakeet, a `mic` session's next decode also goes before other kinds' waiting
-decodes; a running decode is never interrupted.
+One daemon owns the mic; many clients connect. A client runs sessions: a session transcribes the
+mic, what the machine plays, or audio the client sends. One mic session runs at a time; the other
+kinds run next to it. [Session kinds](#session-kinds) has the slots each kind takes and which
+session gives way.
 
 A minimal client: connect, send `hello`, read `welcome`, send `start_session`, read `segment`
 events, send `stop_session`, read `session_ended`. Error codes are in [Error codes](#error-codes).
@@ -64,6 +41,49 @@ events, send `stop_session`, read `session_ended`. Error codes are in [Error cod
   client streaming `audio` faster than the session takes it just waits on its socket writes.
 - Fields shown in an event's example are always present unless the text says when they are
   missing; a field that can be `null` says so.
+
+## Session kinds
+
+| Kind | Command | Transcribes | Slots it takes | Evictable | When a dictation needs its slot |
+| --- | --- | --- | --- | --- | --- |
+| `mic` | `start_session` | the daemon's mic | the mic slot, one backend slot | after 5 min with no speech | never gives way |
+| `system` | `start_system_session` | what the machine plays, and the mic with `with_mic` | one backend slot | never | suspended, after `transcribe` sessions |
+| `transcribe` | `transcribe` | the bytes the client sends: a file ffmpeg reads, or raw PCM | one backend slot | never | suspended first |
+
+The mic slot (the slot) is the right to run the one mic session: a client takes it with
+`start_session` and gives it back when its session ends. Each backend has slots too: every session
+takes one on its backend, and a backend runs at most `max_sessions` sessions at once (config
+`backends.<name>.max_sessions`, default 2). Capacity counts sessions, not clients. A `system`
+session with `with_mic` records the mic without the mic slot, so a dictation runs next to it.
+`system` sessions run on Linux and macOS (14.2 or later). A `transcribe` session runs as fast as
+its audio arrives.
+
+A backend takes the kinds in its `kinds` in `welcome`. `elevenlabs-batch` takes `transcribe` only.
+
+Dictation comes first. When a `start_session` finds its backend full and a session of another kind
+holds a slot there, the daemon suspends that session instead of refusing the start: a `transcribe`
+session before a `system` one, then the most recently started. A suspended session loses nothing.
+It drops its backend connection and keeps its audio; when a slot on its backend frees, it resumes
+and the backend gets the kept audio, longest suspended first. Its client gets `session_suspended` and
+`session_resumed`. Only a `mic` session suspends, and never another `mic` session; those starts
+get `busy`. On Parakeet, a `mic` session's next decode also goes before other kinds' waiting
+decodes; a running decode is never interrupted.
+
+What ends a session:
+
+- Any kind: `stop_session` (the rest is committed), `cancel_session` (the rest is dropped), the
+  client's disconnect (cancelled), or a fatal backend error (`session_error` with `fatal: true`,
+  then `session_ended` with reason `error`). The daemon never ends a session because nobody
+  speaks.
+- `mic`: also another client's start once the slot is `evictable` (reason `evicted`). At daemon
+  shutdown it stops as for `stop_session`.
+- `system` and `transcribe`: daemon shutdown cancels them. So does a `reload` that removes the
+  backend of a suspended one (`session_error {code: "config", fatal: true}`).
+- `system`: lost system audio never ends it; the track goes silent and the daemon retries (see
+  [`start_system_session`](#start_system_session)).
+- `transcribe`: input ffmpeg can't decode (`invalid_request`), and a backend that answers nothing
+  for 60 s (`backend_error`), end it. On `elevenlabs-batch` a `transcribe` session is never
+  suspended, and its stop waits up to 10 minutes for the answer (see [`transcribe`](#transcribe)).
 
 ## Client → daemon
 
@@ -131,8 +151,9 @@ All fields optional.
 - `word_timestamps`: put `words` on `segment` events, and `after_word` on their `markers`.
   Default false.
 
-- `diarize`, `num_speakers`: as for [`transcribe`](#transcribe). No backend that takes `mic`
-  sessions has `diarize`, so `diarize: true` here fails with `unsupported_option`.
+- `diarize`, `num_speakers`: as for [`transcribe`](#transcribe). No built-in backend that takes
+  `mic` sessions has `diarize`, so there `diarize: true` fails with `unsupported_option`; a
+  plugin backend with `diarize: true` in `welcome` takes it in every kind.
 
 Hints (`keyterms`, `previous_text`, `context_key`) are dropped when the backend can't use them; the
 backend's entry in `welcome` says which it takes. Features (`partials`, `word_timestamps`) fail the
@@ -142,9 +163,10 @@ lacks the session's kind.
 Checks run in this order, before either slot changes: field types (`bad_request`), `speech_id`
 (`speech_expired`), the mic slot (`session_active`, `busy`), the backend, language and features,
 then room on the backend (`busy`, unless a session of another kind there can be suspended; see
-the intro). So a request for a missing backend sent while the mic slot is `busy` gets `busy`. An evictable holder's session doesn't count against its backend's capacity:
-a start that would evict it is refused only when the backend is full without it, and then nothing
-is evicted.
+[Session kinds](#session-kinds)). So a request for a missing backend sent while the mic slot is
+`busy` gets `busy`. An evictable holder's session doesn't count against its backend's capacity: a
+start that would evict it is refused only when the backend is full without it, and then nothing is
+evicted.
 
 When the slot is `evictable`, the daemon takes it over in this order:
 
@@ -195,8 +217,8 @@ the backend, language and features, ffmpeg (`tool_unavailable`), then room on th
 (`busy`, `full_slot: "backend"`). A full backend refuses the start; the daemon does not queue it.
 
 The session commits at each pause the VAD finds in the audio and after the backend's chunk cap
-of audio with no pause (25 s for ElevenLabs, `backends.parakeet.max_chunk_seconds` for
-Parakeet); it has no wall-clock commits. It sends `progress` events as it goes. It takes no more
+of audio with no pause (25 s for ElevenLabs, `backends.<name>.max_chunk_seconds` for Parakeet
+and plugins); it has no wall-clock commits. It sends `progress` events as it goes. It takes no more
 audio while 60 s of it (or twice the chunk cap, if more) waits for the backend's text; a backend
 that then answers nothing for 60 s ends the session with a fatal `backend_error`.
 
@@ -456,8 +478,8 @@ sent during a slow start waits for the start; a `ping` doesn't).
 }
 ```
 
-- `backends` lists only the backends set up on this machine; empty when none is. Today:
-  `elevenlabs` and `elevenlabs-batch` (an API key is set; the batch one has `partials: false`,
+- `backends` lists only the backends set up on this machine; empty when none is. The built-in
+  ones: `elevenlabs` and `elevenlabs-batch` (an API key is set; the batch one has `partials: false`,
   `hints: ["keyterms"]`, `diarize: true`, `kinds: ["transcribe"]`) and `parakeet` (local model
   installed; `languages: ["auto"]`, `partials: false`, `hints: ["keyterms"]`), then each plugin
   backend set up, by its name (see [plugins.md](plugins.md)). Plugins have `partials: false`,
@@ -549,7 +571,7 @@ released, and when a `reload` changes the backends or their `max_sessions`.
 }
 ```
 
-- `kind`: `mic`, `system` or `transcribe`; see the intro.
+- `kind`: `mic`, `system` or `transcribe`; see [Session kinds](#session-kinds).
 - `tracks`: only for a `system` session: `["system"]`, or `["system", "mic"]` with `with_mic`.
 - `app`, `app_name`: only for a `system` session started with `app`: the source id, and that
   source's `name`.
@@ -560,7 +582,8 @@ released, and when a `reload` changes the backends or their `max_sessions`.
 - `client_label`, `session_label`, `language`: `null` when not set.
 - The client fields let observers tell sessions apart without waiting for `slot`.
 - Parakeet sends `session_started` without waiting for its model to load (about 1 s when it is
-  not in memory; it leaves memory 10 minutes after the last Parakeet session). The audio is kept
+  not in memory; it leaves memory 10 minutes after the last Parakeet session, config
+  `backends.parakeet.unload_after_minutes`, where 0 keeps it). The audio is kept
   and transcribed once the model is in; a model that fails to load ends the session with
   `model_error`.
 
@@ -633,8 +656,8 @@ At most one a second while the audio comes, and one more once the input is compl
 {"session_id": "…", "reason": "preempted", "by": {"kind": "mic", "pid": 5120, "client_label": "Talkey"}}
 ```
 
-A dictation took this session's slot on its backend; see the intro. Only to the session's client
-and observers. `by` is the dictation's session: `pid` and `client_label` can be `null`. The session
+A dictation took this session's slot on its backend; see [Session kinds](#session-kinds). Only to
+the session's client and observers. `by` is the dictation's session: `pid` and `client_label` can be `null`. The session
 keeps its audio and its markers; `segment` events stop until it resumes.
 
 ### `session_resumed`
@@ -673,9 +696,10 @@ queue again); the audio kept meanwhile goes first. `suspended_seconds`: wall tim
 ```
 
 A backend failure during a session, or `internal` when the daemon fails. The daemon reopens a
-stalled mic by itself and doesn't report it here. In a `system` session, `track` names the track,
-and the system track's capture reports `capture_lost` and `capture_restored` here (non-fatal; see
-[`start_system_session`](#start_system_session)).
+stalled mic by itself and doesn't report it here. In a `system` session, `track` names the track;
+the system track reports `capture_lost` and `capture_restored` here, and the mic track
+`aec_unavailable` (all non-fatal; see [`start_system_session`](#start_system_session)). A
+suspended session whose backend a `reload` removed ends with `config`.
 
 - `fatal: true` is followed by `session_ended` (reason `error`) with every segment committed so far.
 - `fatal: false`: the session goes on. For a lost backend connection, the daemon reconnects and
@@ -711,7 +735,7 @@ Codes of `error` replies, and of `session_error` for the backend codes.
 | `protocol_unsupported` | `hello` | `supported` lists the daemon's protocol versions. |
 | `observers_disabled` | `hello` | The config has `server.observers = false`; connect without `observe_all`. |
 | `bad_request` | any | Not a valid message or command; `field` names a field of the wrong type. |
-| `busy` | `start_session`, `transcribe`, `start_system_session` | A slot is full and no session there can be suspended; `slot` has every slot. `full_slot`: `mic` (another client holds the mic slot; wait for a `slot` event with `idle` or `evictable`) or `backend` (`backend` runs `max_sessions` sessions; wait for room or use another backend). `holder` (`pid`, `client_label`, `kind`; the first two can be `null`) is the session in the way: the mic holder, or the oldest on the backend. |
+| `busy` | `start_session`, `transcribe`, `start_system_session` | A slot is full and no session there can be suspended; `slot` has every slot. `full_slot`: `mic` (another client holds the mic slot; wait for a `slot` event with `idle` or `evictable`) or `backend` (the backend named in `backend` runs `max_sessions` sessions; wait for room or use another backend). `holder` (`pid`, `client_label`, `kind`; the first two can be `null`) is the session in the way: the mic holder, or the oldest on the backend. |
 | `session_active` | `start_session`, `transcribe`, `start_system_session` | This client already holds a session; `slot` has it. Stop it first. |
 | `speech_expired` | `start_session` | The `speech_id` is unknown or its start left the buffer. Start without it. |
 | `no_backend` | `start_session`, `transcribe`, `start_system_session` | No backend set up; the message names `stt-daemon key set elevenlabs` and `stt-daemon backend install parakeet`. |
@@ -725,7 +749,7 @@ Codes of `error` replies, and of `session_error` for the backend codes.
 | `session_stopping` | `add_marker` | The session is ending. |
 | `invalid` | `add_marker`, `audio`, `start_system_session` | `marker` missing or blank, `data` not base64 or over 1 MiB, or `app` not a listed source; `field` names the field. |
 | `out_of_range` | `add_marker` | `at` is before `started_at`. |
-| `config` | `reload` | Config or credentials invalid; the last setup stays. |
+| `config` | `reload`; `session_error`, `fatal: true` | Config or credentials invalid; the last setup stays. In `session_error`: a `reload` removed the backend of a suspended session. |
 | `capture_lost`, `capture_restored` | `session_error`, `fatal: false` | A `system` session's track stopped getting audio, or gets it again; `track` names it. The session goes on. |
 | `aec_unavailable` | `session_error`, `fatal: false`, `track: "mic"` | The `mic` track of a `system` session takes the plain mic: echo cancellation could not start, or stopped. Sent once; the message says why and names the install command when something is missing. |
 | `internal` | any | The daemon failed; its log says why. |
@@ -822,8 +846,9 @@ at once when Core Audio reports a change), and each process whose audio output r
 
 ## Observers
 
-A client with `observe_all: true` gets every `session_started`, `partial`, `segment`,
-`session_ended` and `session_error`, for every client's session (sent with only the options that
+A client with `observe_all: true` gets every `session_started`, `partial`, `segment`, `progress`,
+`session_suspended`, `session_resumed`, `session_ended` and `session_error`, for every client's
+session (sent with only the options that
 session asked for), and the VAD events during sessions. It maps `session_id` to a client through
 the client fields on `session_started`. Copies sent to observers have no `reply_to`, since ids
 belong to the connection that sent the command. An observer gets its own session's events once,
