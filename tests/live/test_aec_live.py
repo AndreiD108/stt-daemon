@@ -100,7 +100,7 @@ SENTENCE = "Scribbly sends pen marks while Talkey holds the push to talk key."
 FAR_ONLY_S = (4.0, 8.6)
 """Speakers only, after the built-in filter's first seconds and before the first cue to read."""
 NEAR_ONLY_S = (17.4, 22.1)
-READS_S = ((9.4, 14.2), (17.4, 22.4))
+READS_S = ((9.4, 15.8), (17.4, 22.4))
 MODES = ("off", "pipewire", "builtin")
 
 
@@ -120,12 +120,16 @@ async def collect(source: CaptureSource, since: float, until: float) -> list[Fra
 
 
 def on_timeline(frames: list[Frame], t0: float, seconds: float) -> np.ndarray:
+    """Frames back to back from the first one's start; per-frame stamps jitter and garble speech."""
     out = np.zeros(round(seconds * RATE))
-    for frame in frames:
-        i = round((frame.start - t0) * RATE)
-        part = frame.samples[: max(0, out.size - i)]
-        if i >= 0:
-            out[i : i + part.size] = part
+    if not frames:
+        return out
+    audio = np.concatenate([frame.samples for frame in frames])
+    i = round((frames[0].start - t0) * RATE)
+    if i < 0:
+        audio, i = audio[-i:], 0
+    part = audio[: max(0, out.size - i)]
+    out[i : i + part.size] = part
     return out
 
 
