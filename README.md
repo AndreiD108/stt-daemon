@@ -7,13 +7,13 @@ into text for any app on your machine. Apps connect over a Unix socket, get the
 text as you speak, and never touch the mic themselves. It also transcribes what
 your machine plays, a call or a video, and audio files.
 
-It handles what goes wrong in homemade voice input: cut-off first words, your
-speakers in the transcript, a sentence split at every pause to think,
+It handles what typically goes wrong with voice input: cut-off first words,
+your speakers in the transcript, sentences splitting at every pause,
 connections that drop mid-sentence. No recording code, no model or API to
 manage.
 
-Transcribe in the cloud with ElevenLabs Scribe, on your own CPU with NVIDIA's
-Parakeet, or with a backend you add yourself.
+Transcribe in the cloud with ElevenLabs Scribe, locally with Parakeet, or with
+a backend you add yourself.
 
 ![stt-daemon listen prints what it hears, word by word](docs/media/hero.gif)
 
@@ -30,10 +30,6 @@ minutes, in any language. Say hello, start a session, read what comes back:
   start a session from a detected speech, and the first word is in it.
 - **Key terms.** Names and jargon the backend should expect.
 - **Markers.** Drop a marker at a moment and get it back between the words said then.
-- **Context.** On ElevenLabs, the previous text per window or document, so a
-  dictation picks up where it left off.
-- **Dictation first.** A dictation never waits for a file or meeting transcription on
-  a full backend: the other session pauses, loses nothing, and goes on after.
 
 ![A client starts a session with key terms and gets VAD events, partials, and a segment with word times](docs/media/client.gif)
 
@@ -96,10 +92,7 @@ stt-daemon transcribe --json --backend parakeet talk.m4a   # text, words and seg
 stt-daemon transcribe --backend elevenlabs-batch --diarize interview.mp3   # each line names its speaker
 ```
 
-With `elevenlabs` as the default, files go to `elevenlabs-batch`: the daemon uploads the file as
-it is and prints the text when ElevenLabs answers. On Parakeet, the file goes through the daemon
-as fast as the model takes it, and `ffmpeg` must be on your PATH; anything ffmpeg reads works,
-audio or video. Either way, word times count from the start of the file.
+Any audio or video file ffmpeg reads works.
 
 ## Transcribe a meeting
 
@@ -108,11 +101,7 @@ A client can transcribe what your machine plays, a call or a video, with
 out as one transcript, each line marked `[system]` or `[mic]`. It runs next to your dictation,
 and the mic track has echo cancellation, so speakers are fine.
 
-On macOS (14.2 or later) it needs [`audiotee`](https://github.com/makeusabrew/audiotee) on your
-`PATH` when you run `stt-daemon service install` (the service keeps that `PATH`); build it with
-`swift build -c release`. If you install it later, run `stt-daemon service install` again. The
-first session makes macOS ask for the System Audio Recording permission for `stt-daemon`; allow
-it once.
+![A note-taking client picks the call app, and both sides of the call come out as one transcript](docs/media/meeting.gif)
 
 To take one application's audio only, say the call app and not the music next to it, a client
 picks it from the sources the daemon lists (every app that plays audio, with its name) and starts
@@ -128,6 +117,8 @@ it by its name, and `stt-daemon backend list` shows whether it loaded. The contr
 example for any OpenAI-compatible endpoint are in [docs/plugins.md](docs/plugins.md).
 
 ## Update
+
+stt-daemon never updates itself or checks for updates. To update:
 
 ```sh
 uv tool upgrade stt-daemon

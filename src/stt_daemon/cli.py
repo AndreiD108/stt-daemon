@@ -182,7 +182,9 @@ def _service(args: argparse.Namespace) -> int:
                 print(f"wrote {path}")
             if unit_dir is None:
                 print("the service is enabled and running; it starts at login")
+            tool_missing = False
             if problem := check_tool("ffmpeg"):
+                tool_missing = True
                 print(f"`stt-daemon transcribe` needs ffmpeg: {problem}")
             if sys.platform == "linux" and (problem := check_tool("pw-record")):
                 print(f"system audio sessions need pw-record: {problem}")
@@ -191,9 +193,13 @@ def _service(args: argparse.Namespace) -> int:
             if sys.platform == "linux" and (
                 problem := check_tool("pw-cli") or check_pipewire_aec()
             ):
-                print(f"echo cancellation on a system session's mic track: {problem}")
+                print(f"echo cancellation on the mic: {problem}")
             if sys.platform == "darwin" and (problem := check_tool("audiotee")):
+                tool_missing = True
                 print(f"system audio sessions need audiotee: {problem}")
+            if sys.platform == "darwin" and tool_missing:
+                # launchd keeps the PATH from install time.
+                print("after installing what is missing, run `stt-daemon service install` again")
             print(BACKEND_SETUP)
         case "remove":
             removed = manager.remove()
