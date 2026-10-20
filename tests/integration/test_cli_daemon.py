@@ -55,7 +55,7 @@ async def test_listen_prints_segments_and_exits_0(daemon: Harness) -> None:
     assert "hello" in segment
     assert "⟦1⟧" in segment
     assert "  words   hello@" in text
-    assert "ended     stopped, 1 segments" in text
+    assert "ended     stopped, 1 segment," in text
 
 
 async def test_listen_exits_1_after_a_session_error(daemon: Harness) -> None:

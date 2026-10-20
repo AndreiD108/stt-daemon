@@ -210,7 +210,8 @@ class _Client:
                 self._line(f"error     {d.get('code')}: {d.get('message')}")
             case "session_ended":
                 count, duration = d.get("segment_count", 0), _s(d.get("duration_ms", 0))
-                self._line(f"ended     {d['reason']}, {count} segments, {duration}")
+                noun = "segment" if count == 1 else "segments"
+                self._line(f"ended     {d['reason']}, {count} {noun}, {duration}")
                 self._line(f"text      {d.get('final_text', '')}")
             case _:
                 pass

@@ -4,14 +4,16 @@ Your mic, as a service.
 
 stt-daemon is a small local service that owns the microphone and turns speech
 into text for any app on your machine. Apps connect over a Unix socket, get the
-text as you speak, and never touch the mic themselves.
+text as you speak, and never touch the mic themselves. It also transcribes what
+your machine plays, a call or a video, and audio files.
 
-It handles what goes wrong in homemade voice input: cut-off first words,
-pauses sent as audio, connections that drop mid-sentence. No recording code,
-no audio files, no model or API to manage.
+It handles what goes wrong in homemade voice input: cut-off first words, your
+speakers in the transcript, a sentence split at every pause to think,
+connections that drop mid-sentence. No recording code, no model or API to
+manage.
 
-Transcribe in the cloud with ElevenLabs Scribe, or on your own CPU with
-NVIDIA's Parakeet.
+Transcribe in the cloud with ElevenLabs Scribe, on your own CPU with NVIDIA's
+Parakeet, or with a backend you add yourself.
 
 ![stt-daemon listen prints what it hears, word by word](docs/media/hero.gif)
 
@@ -20,15 +22,16 @@ NVIDIA's Parakeet.
 The protocol is a few JSON lines over a socket, so a client gets written in
 minutes, in any language. Say hello, start a session, read what comes back:
 
-- **Streaming.** Partial text while you speak; final segments as they commit.
+- **Streaming.** Final segments as they commit, and on ElevenLabs partial text
+  while you speak.
 - **Word times.** Every word with its start and end, on the capture clock,
   pauses included.
 - **Voice activity.** `speech_started` and `speech_ended` events. A client can
   start a session from a detected speech, and the first word is in it.
 - **Key terms.** Names and jargon the backend should expect.
 - **Markers.** Drop a marker at a moment and get it back between the words said then.
-- **Context.** The previous text per window or document, so a dictation picks up
-  where it left off.
+- **Context.** On ElevenLabs, the previous text per window or document, so a
+  dictation picks up where it left off.
 - **Dictation first.** A dictation never waits for a file or meeting transcription on
   a full backend: the other session pauses, loses nothing, and goes on after.
 
@@ -41,16 +44,18 @@ and you're good to go.
 
 The daemon runs as a user service and holds the mic, with recent audio in a
 buffer, so nothing gets chopped off the start of what you say. You can turn
-that off and have the mic open only when transcribing. Apps connect over a Unix
-socket and ask for a session; one dictation runs at a time. Two backends:
+that off and have the mic open only when transcribing. On Linux the mic goes
+through PipeWire's echo cancellation, so what your speakers play stays out of
+what you dictate.
+
+Apps connect over a Unix socket and ask for a session. One dictation runs at a
+time; file and meeting transcriptions run next to it. Backends:
 
 - **ElevenLabs Scribe v2 Realtime**, in the cloud. Needs an API key.
-- **Parakeet TDT 0.6B v3**, local. Runs on the CPU.
-
-Files also go to **ElevenLabs Scribe v2** as one upload (`elevenlabs-batch`, same key), which can
-tell speakers apart.
-
-Any other backend is a plugin you can [write yourself](#write-your-own-backend).
+- **ElevenLabs Scribe v2**, for files: one upload, same key. Tells speakers apart.
+- **Parakeet TDT 0.6B v3**, local. Runs on the CPU, and keeps most background
+  voices out of what you dictate.
+- **Your own**, as a plugin you [write yourself](#write-your-own-backend).
 
 ![The same sentence through ElevenLabs in the cloud and through Parakeet on the CPU](docs/media/backends.gif)
 
@@ -88,7 +93,7 @@ Speak, press Enter, and read what the daemon heard.
 ```sh
 stt-daemon transcribe talk.m4a notes.mp3           # the text of each, a blank line between
 stt-daemon transcribe --json --backend parakeet talk.m4a   # text, words and segments as JSON
-stt-daemon transcribe --diarize --speakers 2 interview.mp3   # each line starts with its speaker
+stt-daemon transcribe --backend elevenlabs-batch --diarize interview.mp3   # each line names its speaker
 ```
 
 With `elevenlabs` as the default, files go to `elevenlabs-batch`: the daemon uploads the file as
@@ -100,17 +105,14 @@ audio or video. Either way, word times count from the start of the file.
 
 A client can transcribe what your machine plays, a call or a video, with
 `start_system_session`. With `with_mic`, your mic is a second track, so both sides of a call come
-out as one transcript, each line marked `[system]` or `[mic]`. It runs next to your dictation and
-takes no mic slot. The mic track has echo cancellation, so speakers are fine.
+out as one transcript, each line marked `[system]` or `[mic]`. It runs next to your dictation,
+and the mic track has echo cancellation, so speakers are fine.
 
-- **Linux**: it needs `pw-record`, `pw-dump` and `pw-cli`, from your distribution's PipeWire
-  tools, and PipeWire's echo-cancel module for the mic track; `stt-daemon service install` names
-  the packages that are missing.
-- **macOS** (14.2 or later): it needs [`audiotee`](https://github.com/makeusabrew/audiotee) on
-  your `PATH` when you run `stt-daemon service install` (the agent keeps that `PATH`); build it
-  with `swift build -c release`. If you install it later, run `stt-daemon service install`
-  again. The first session makes macOS ask for the System Audio Recording permission for
-  `stt-daemon`; allow it once.
+On macOS (14.2 or later) it needs [`audiotee`](https://github.com/makeusabrew/audiotee) on your
+`PATH` when you run `stt-daemon service install` (the service keeps that `PATH`); build it with
+`swift build -c release`. If you install it later, run `stt-daemon service install` again. The
+first session makes macOS ask for the System Audio Recording permission for `stt-daemon`; allow
+it once.
 
 To take one application's audio only, say the call app and not the music next to it, a client
 picks it from the sources the daemon lists (every app that plays audio, with its name) and starts
