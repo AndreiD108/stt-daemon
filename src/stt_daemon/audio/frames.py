@@ -39,12 +39,14 @@ class Frame:
         return self.samples.size / self.sample_rate
 
     def since(self, t: float) -> "Frame | None":
-        """The part of this frame from `t` on, or None when it all lies before `t`."""
+        """The part of this frame from `t` on, or None when no whole sample lies from `t` on."""
         if self.end <= t:
             return None
         skip = round((t - self.start) * self.sample_rate)
         if skip <= 0:
             return self
+        if skip >= self.samples.size:
+            return None
         return Frame(self.samples[skip:], self.end, self.sample_rate)
 
     def pack(self) -> "PackedFrame":

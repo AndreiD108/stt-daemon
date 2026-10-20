@@ -11,9 +11,8 @@ from pathlib import Path
 import numpy as np
 
 from stt_daemon.audio.audiotee_capture import AudioteeCapture, audiotee_command, last_error
-
-FAKE = Path(__file__).parents[1] / "fake_audiotee.py"
-FIXTURE = Path(__file__).parents[1] / "fixtures" / "two_phrases.wav"
+from unit.paths import FAKE_AUDIOTEE as FAKE
+from unit.paths import TWO_PHRASES as FIXTURE
 
 
 def fake(*extra: str) -> Callable[[str | None], list[str]]:

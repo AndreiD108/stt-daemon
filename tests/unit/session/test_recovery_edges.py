@@ -1,13 +1,17 @@
-"""Recovery boundaries: close-time text, unknown cuts and a failure after the last answer."""
+"""Recovery boundaries: close-time text, unknown cuts, a failure after the last answer, and the
+reference a replay sends."""
 
 import asyncio
 
 import pytest
-from test_recovery import Rig, limited, numbers, span, started
 
-from stt_daemon.backends.base import Committed, Reference
+from stt_daemon.backends.base import Committed, OpenOptions, Reference
 from stt_daemon.backends.fake import FakeBackend, FakeReply
 from stt_daemon.session import recovery
+from stt_daemon.session.recovery import Link
+from stt_daemon.session.timeline import Timeline
+from unit.session.test_recovery import Rig, limited, numbers, span, started
+from unit.session.test_reference import FRAME, RATE, history, mic, taken
 
 
 @pytest.fixture(autouse=True)
@@ -99,3 +103,35 @@ async def test_final_coalesces_with_an_inflight_periodic_commit(
     assert rig.conn(0).commit_ids == [1]
     assert rig.committed == [("once", True)]
     await rig.link.close()
+
+
+async def test_a_replay_sends_the_reference_built_at_the_first_send() -> None:
+    playback = await taken(history((0.0, RATE * 2, 0.5)))
+    backend = FakeBackend([FakeReply(fail=("network", True)), "after"])
+    committed: list[str] = []
+    link = Link(
+        backend=backend,
+        options=OpenOptions(),
+        timeline=Timeline(0.0, RATE),
+        chunk_samples=RATE // 10,
+        on_committed=lambda event, _: committed.append(event.text),
+        on_partial=lambda _: None,
+        on_error=lambda _code, _message: None,
+        on_fatal=lambda _code, _message: None,
+        playback=playback,
+    )
+    await link.open()
+    for i in range(15):
+        link.queue(mic(1.0 + i * FRAME / RATE, FRAME))
+    link.commit()
+    async with asyncio.timeout(3):
+        while not committed:
+            await asyncio.sleep(0.01)
+    first, second = backend.connections
+    [sent] = first.references
+    [replayed] = second.references
+    assert sent is not None
+    assert replayed is sent
+    assert sent.spans[0].playback[0] == 0.5
+    await link.close()
+    await playback.close()

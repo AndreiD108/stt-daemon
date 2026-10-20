@@ -2,15 +2,14 @@
 
 import asyncio
 import time
-from pathlib import Path
 
 from stt_daemon.audio.capture import CaptureSource
 from stt_daemon.audio.vad import GAP_RESET_S, SpeechEnded, SpeechStarted, VadEvent
 from stt_daemon.audio.wav_capture import read_wav
 from stt_daemon.config import VadConfig
 from stt_daemon.server.speech import SpeechWatch
+from unit.paths import TWO_PHRASES as FIXTURE
 
-FIXTURE = Path(__file__).parents[1] / "fixtures" / "two_phrases.wav"
 """Phrases at 1.00-3.74 s and 5.74-7.81 s."""
 RATE = 16000
 CHUNK = 320

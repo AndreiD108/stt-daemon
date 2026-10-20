@@ -1,6 +1,5 @@
 """A local stand-in for the ElevenLabs realtime endpoint, and helpers for its tests."""
 
-import asyncio
 import json
 from collections.abc import Callable
 from typing import Any
@@ -78,12 +77,6 @@ class FakeElevenLabs:
             if msg["commit"]:
                 self.commits += 1
                 await self.push(*self.reply(self.commits))
-
-
-async def wait_until(check: Callable[[], bool], timeout: float = 1.0) -> None:
-    async with asyncio.timeout(timeout):
-        while not check():
-            await asyncio.sleep(0.005)
 
 
 def commits(events: list[BackendEvent]) -> list[Committed]:

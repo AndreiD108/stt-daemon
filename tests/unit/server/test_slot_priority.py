@@ -5,8 +5,6 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
-from fake_elevenlabs import wait_until
-from slot_harness import A, B, C, Harness, SpyCapture
 
 from stt_daemon.audio.stream_capture import ByteStreamCapture
 from stt_daemon.backends.base import OpenFailed, OpenOptions
@@ -17,6 +15,8 @@ from stt_daemon.server.slot import ClientGone, Emit
 from stt_daemon.server.slot_state import Client, StartRefused
 from stt_daemon.session.options import SessionOptions
 from stt_daemon.session.session import Session
+from unit.server.slot_harness import A, B, C, Harness, SpyCapture
+from unit.waiting import wait_until
 
 D = Client("c4", "Batch", Peer(900, ("batch",)))
 

@@ -9,8 +9,7 @@ from stt_daemon import cli
 from stt_daemon.cli import main
 from stt_daemon.config import data_dir
 from stt_daemon.credentials import load_credentials
-
-FIXTURES = Path(__file__).parents[1] / "fixtures" / "plugins"
+from unit.paths import PLUGIN_FIXTURES as FIXTURES
 
 
 @pytest.fixture

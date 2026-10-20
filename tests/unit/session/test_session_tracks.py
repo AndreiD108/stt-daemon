@@ -6,7 +6,6 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from test_session_audio import fake, segments
 
 from stt_daemon.audio.pw_capture import PwRecordCapture
 from stt_daemon.audio.stream_capture import ToolMissing
@@ -18,9 +17,8 @@ from stt_daemon.session import recovery
 from stt_daemon.session.events import SessionError, SessionEvent, SessionStarted
 from stt_daemon.session.options import SessionOptions
 from stt_daemon.session.session import Session
-
-FIXTURES = Path(__file__).parents[1] / "fixtures"
-FAKE_PW_RECORD = Path(__file__).parents[1] / "fake_pw_record.py"
+from unit.paths import FAKE_PW_RECORD, FIXTURES
+from unit.session.test_session_audio import fake, segments
 
 
 @pytest.fixture(autouse=True)

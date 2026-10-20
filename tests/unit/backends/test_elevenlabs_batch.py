@@ -6,7 +6,6 @@ import wave
 from collections.abc import Iterator
 
 import pytest
-from fake_elevenlabs import TEST_KEY
 from fake_elevenlabs_batch import FakeBatch, answer, serve_batch, spacing, word
 
 from stt_daemon.backends import elevenlabs_batch
@@ -14,6 +13,7 @@ from stt_daemon.backends.base import Committed, FileAudio, OpenFailed, OpenOptio
 from stt_daemon.backends.elevenlabs_batch import ElevenLabsBatchBackend, committed_runs
 from stt_daemon.config import Config
 from stt_daemon.credentials import Credentials
+from unit.backends.fake_elevenlabs import TEST_KEY
 
 MP3ISH = b"ID3\x04fake container bytes"
 

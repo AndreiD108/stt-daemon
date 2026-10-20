@@ -14,8 +14,8 @@ from stt_daemon.audio import system_capture
 from stt_daemon.audio.frames import Frame
 from stt_daemon.audio.pw_capture import PwRecordCapture, pw_record_command
 from stt_daemon.audio.stream_capture import ToolMissing
+from unit.paths import FAKE_PW_RECORD as FAKE
 
-FAKE = Path(__file__).parents[1] / "fake_pw_record.py"
 REAL_SLEEP = asyncio.sleep
 
 

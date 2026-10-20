@@ -4,7 +4,6 @@ import asyncio
 import itertools
 import time
 from dataclasses import replace
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -17,8 +16,8 @@ from stt_daemon.session.events import PartialText, SessionEnded, SessionEvent
 from stt_daemon.session.options import SessionOptions
 from stt_daemon.session.session import Session
 from stt_daemon.session.transcript import Segment
+from unit.paths import TWO_PHRASES as FIXTURE
 
-FIXTURE = Path(__file__).parents[1] / "fixtures" / "two_phrases.wav"
 RATE = 16000
 
 

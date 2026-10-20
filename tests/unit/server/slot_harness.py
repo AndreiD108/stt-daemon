@@ -6,8 +6,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
-from fake_elevenlabs import wait_until
-
 from stt_daemon.audio.capture import CaptureSource
 from stt_daemon.audio.frames import Attachment
 from stt_daemon.audio.wav_capture import WavCapture
@@ -21,8 +19,7 @@ from stt_daemon.server.slot_state import Client, SlotState
 from stt_daemon.session.events import SessionEnded, SessionEvent, SessionStarted
 from stt_daemon.session.options import SessionOptions
 from stt_daemon.session.session import Session
-
-FIXTURE = Path(__file__).parents[1] / "fixtures" / "two_phrases.wav"
+from unit.waiting import wait_until
 
 A = Client("c1", "Scribbly", Peer(41230, ("scribbly", "serve")))
 B = Client("c2", "Talkey", Peer(5120, ("talkey",)))

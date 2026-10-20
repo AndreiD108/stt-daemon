@@ -8,12 +8,12 @@ from typing import Literal
 
 import numpy as np
 import pytest
-from test_session_audio import FIXTURE, capture_ms, fake, play_until, run, segments
 
 from stt_daemon.audio.wav_capture import read_wav
 from stt_daemon.backends.fake import FakeReply
 from stt_daemon.session import recovery
 from stt_daemon.session.events import SessionEnded, SessionError
+from unit.session.test_session_audio import FIXTURE, capture_ms, fake, play_until, run, segments
 
 
 @pytest.fixture(autouse=True)

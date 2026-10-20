@@ -23,8 +23,9 @@ from stt_daemon.config import Config
 from stt_daemon.credentials import Credentials
 from stt_daemon.server.backend_set import Setup, load_setup, resolve
 from stt_daemon.server.messages import RequestError, parse_start
+from unit.paths import PLUGIN_FIXTURES as FIXTURES
+from unit.paths import REPO
 
-FIXTURES = Path(__file__).parents[1] / "fixtures" / "plugins"
 RATE = 16000
 
 
@@ -371,7 +372,7 @@ def test_options_the_plugin_lacks_are_refused() -> None:
 
 
 def test_the_docs_example_is_the_fixture_plugin() -> None:
-    doc = (Path(__file__).parents[2] / "docs" / "plugins.md").read_text()
+    doc = (REPO / "docs" / "plugins.md").read_text()
     example = (FIXTURES / "openai_transcriptions.py").read_text()
     assert f"```python\n{example}```" in doc
 

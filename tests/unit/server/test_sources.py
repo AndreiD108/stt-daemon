@@ -6,7 +6,6 @@ import logging
 from pathlib import Path
 
 import pytest
-from fake_elevenlabs import wait_until
 from fake_pw_dump import FakePipeWire
 
 from stt_daemon.server.sources import (
@@ -18,8 +17,10 @@ from stt_daemon.server.sources import (
     SourceScan,
     SourceTable,
 )
+from unit.paths import FIXTURES
+from unit.waiting import wait_until
 
-RECORDED = Path(__file__).parents[1] / "fixtures" / "pw_dump_monitor.json"
+RECORDED = FIXTURES / "pw_dump_monitor.json"
 """`pw-dump -m -N` on PipeWire 1.4: the registry, `pw-play` starting and ending, then a
 `pw-record` stream reusing the registry id `pw-play`'s node had."""
 

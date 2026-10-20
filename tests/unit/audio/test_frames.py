@@ -52,6 +52,15 @@ async def test_attach_since_trims_the_boundary_frame() -> None:
     assert attachment.prepended_samples == CHUNK // 2 + CHUNK
 
 
+async def test_since_inside_the_last_half_sample_drops_the_frame() -> None:
+    hub = FrameHub(RATE, 1000)
+    _push(hub, 0.1, 10.0 + CHUNK_S)
+    _push(hub, 0.2, 10.0 + 2 * CHUNK_S)
+    frames = await _drain(hub.attach(10.0 + CHUNK_S - 0.4 / RATE).queue)
+    assert [f.samples.size for f in frames] == [CHUNK]
+    assert _values(frames) == [0.2]
+
+
 async def test_since_before_the_ring_keeps_everything() -> None:
     hub = FrameHub(RATE, 1000)
     _push(hub, 0.1, 10.0)

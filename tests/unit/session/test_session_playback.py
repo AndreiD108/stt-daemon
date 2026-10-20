@@ -4,7 +4,7 @@ in a quiet stretch, and the speakers released at the end."""
 import asyncio
 import time
 from dataclasses import replace
-from pathlib import Path
+from typing import cast
 
 import numpy as np
 
@@ -16,9 +16,12 @@ from stt_daemon.backends.fake import FAKE_CAPABILITIES, FakeBackend
 from stt_daemon.config import Config
 from stt_daemon.session.events import SessionEvent
 from stt_daemon.session.options import SessionOptions
+from stt_daemon.session.segments import Segments
 from stt_daemon.session.session import Session
+from stt_daemon.session.tracks import Track, TrackOwner
+from unit.audio.test_speakers import FakeSpeakers
+from unit.paths import TWO_PHRASES as FIXTURE
 
-FIXTURE = Path(__file__).parents[1] / "fixtures" / "two_phrases.wav"
 RATE = 16000
 
 
@@ -134,3 +137,20 @@ async def test_a_quiet_stretch_keeps_only_the_playback_it_may_still_send() -> No
         await session.cancel()
     finally:
         await capture.stop()
+
+
+async def test_a_track_that_never_took_a_hold_releases_none() -> None:
+    monitor = SpeakerMonitor(FakeSpeakers, keep_open=False)
+    await monitor.hold()  # another session's
+    track = Track(
+        name=None,
+        owner=cast(TrackOwner, None),
+        config=Config(),
+        capture=WavCapture(),
+        backend=FakeBackend([]),
+        segments=Segments(auto_language=False, word_timestamps=False, track=None),
+        playback=monitor,
+    )
+    await track.release_playback()
+    assert FakeSpeakers.made[-1].running
+    await monitor.stop()

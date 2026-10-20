@@ -23,9 +23,8 @@ from stt_daemon.audio.pw_capture import PwRecordCapture
 from stt_daemon.audio.system_capture import AppTarget
 from stt_daemon.config import AudioConfig, ConfigError, echo_cancel_mode, load_config
 from stt_daemon.service.preflight import check_pipewire_aec
+from unit.paths import FAKE_PW_CLI, FAKE_PW_RECORD
 
-FAKE_PW_CLI = Path(__file__).parents[1] / "fake_pw_cli.py"
-FAKE_PW_RECORD = Path(__file__).parents[1] / "fake_pw_record.py"
 NAME = "stt-daemon-aec-s1"
 MIC_LEVEL = 0.25
 

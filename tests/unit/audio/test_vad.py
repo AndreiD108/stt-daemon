@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import numpy as np
 import pytest
 
@@ -13,9 +11,9 @@ from stt_daemon.audio.vad import (
     VadEvent,
 )
 from stt_daemon.audio.wav_capture import read_wav
+from unit.paths import TWO_PHRASES as FIXTURE
 
 RATE = 16000
-FIXTURE = Path(__file__).parents[1] / "fixtures" / "two_phrases.wav"
 # Where the fixture was built to put speech (TTS phrases, -40 dBFS edges), seconds from its start.
 SPEECH = ((1.0, 3.74), (5.74, 7.81))
 START_TOLERANCE_S = 0.08

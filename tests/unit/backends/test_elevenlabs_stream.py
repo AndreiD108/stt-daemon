@@ -5,7 +5,6 @@ from urllib.parse import parse_qs, urlsplit
 
 import numpy as np
 import pytest
-from fake_elevenlabs import TEST_KEY, FakeElevenLabs, commits, committed, el_word, wait_until
 
 from stt_daemon.audio.frames import Samples
 from stt_daemon.backends import elevenlabs
@@ -20,6 +19,8 @@ from stt_daemon.backends.base import (
     Word,
 )
 from stt_daemon.backends.elevenlabs import ElevenLabsBackend, ElevenLabsConnection
+from unit.backends.fake_elevenlabs import TEST_KEY, FakeElevenLabs, commits, committed, el_word
+from unit.waiting import wait_until
 
 
 def _audio(seconds: float, value: float = 0.0) -> Samples:

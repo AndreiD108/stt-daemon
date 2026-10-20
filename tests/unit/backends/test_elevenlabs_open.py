@@ -5,13 +5,13 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
-from fake_elevenlabs import TEST_KEY, FakeElevenLabs
 
 from stt_daemon.backends import elevenlabs
 from stt_daemon.backends.base import BackendEvent, BackendUnavailable, OpenFailed, OpenOptions
 from stt_daemon.backends.elevenlabs import ElevenLabsBackend
 from stt_daemon.config import Config, ElevenLabsConfig
 from stt_daemon.credentials import Credentials
+from unit.backends.fake_elevenlabs import TEST_KEY, FakeElevenLabs
 
 
 class FakeWS:

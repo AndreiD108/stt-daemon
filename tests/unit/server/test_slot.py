@@ -5,8 +5,6 @@ import asyncio
 import time
 
 import pytest
-from fake_elevenlabs import wait_until
-from slot_harness import A, B, C, Harness, OtherFake, SlowStop, SpyCapture
 
 from stt_daemon.audio.vad import SpeechEnded, SpeechStarted
 from stt_daemon.backends.base import OpenFailed
@@ -15,6 +13,8 @@ from stt_daemon.server.slot import ClientGone, Emit
 from stt_daemon.server.slot_state import StartRefused
 from stt_daemon.session.events import EvictedBy
 from stt_daemon.session.session import Session
+from unit.server.slot_harness import A, B, C, Harness, OtherFake, SlowStop, SpyCapture
+from unit.waiting import wait_until
 
 
 async def test_start_announces_busy_before_started_and_idle_after_ended(

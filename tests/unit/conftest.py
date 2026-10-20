@@ -2,12 +2,12 @@ import asyncio
 from collections.abc import AsyncIterator
 
 import pytest
-from fake_elevenlabs import TEST_KEY, FakeElevenLabs
-from slot_harness import SpyCapture
 from websockets.asyncio.server import serve
 
 from stt_daemon.backends.elevenlabs import ElevenLabsBackend
 from stt_daemon.config import ElevenLabsConfig
+from unit.backends.fake_elevenlabs import TEST_KEY, FakeElevenLabs
+from unit.server.slot_harness import SpyCapture
 
 
 @pytest.fixture
