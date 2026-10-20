@@ -1,4 +1,5 @@
-"""A stand-in for `pw-record`: s16 mono 16 kHz on stdout in real time, from a WAV, then silence.
+"""A stand-in for `pw-record`: s16 mono 16 kHz on stdout in real time, from a WAV (once, then
+silence; or over and over with `--loop`).
 
 Each start appends a line to `--log` (with its `--target`), so a test can count restarts and
 script the nth start. With `--live`, it exits as `pw-record` does once its target isn't in that
@@ -19,6 +20,7 @@ CHUNK = 320
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--wav", type=Path)
+    parser.add_argument("--loop", action="store_true")
     parser.add_argument("--log", type=Path)
     parser.add_argument("--exit-after", type=float, help="exit after this many seconds")
     parser.add_argument("--stall-after", type=float, help="stop writing, stay alive")
@@ -49,6 +51,8 @@ def main() -> None:
         if limited and args.stall_after is not None and elapsed >= args.stall_after:
             time.sleep(3600)
         at = sent * CHUNK * 2
+        if args.loop and pcm:
+            at %= len(pcm)
         chunk = pcm[at : at + CHUNK * 2]
         out.write(chunk + bytes(CHUNK * 2 - len(chunk)))
         out.flush()

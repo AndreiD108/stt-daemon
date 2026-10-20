@@ -2,14 +2,16 @@
 slot, and their failures as `error` replies. Mixed into `Server`."""
 
 import contextlib
+import logging
+import os
 import sys
-import uuid
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
 
 from ..audio import aec_pipewire
 from ..audio.aec_builtin import BuiltinEchoCancelledMic
-from ..audio.aec_pipewire import EchoCancelledMic, PipewireAec
+from ..audio.aec_mic import EchoCancelledMic
+from ..audio.aec_pipewire import PipewireAec
 from ..audio.audiotee_capture import AudioteeCapture
 from ..audio.capture import CaptureSource, CaptureUnavailable
 from ..audio.pw_capture import PwRecordCapture
@@ -32,6 +34,10 @@ from .sources import PwDumpScan, Source, SourceScan
 from .speech import SpeechWatch
 
 SYSTEM_PLATFORMS = ("linux", "darwin")
+DEFAULT_INPUTS = ("", "default", "pipewire", "pulse")
+"""`audio.device` values that take the system's default input, as the echo-cancel module does."""
+
+log = logging.getLogger(__name__)
 
 
 def system_capture(
@@ -72,7 +78,6 @@ class Starts:
     _system_capture: Callable[[AppTarget | None], SystemCapture]
     _speakers: SpeakerMonitor | None
     _sources: SourceScan
-    _aec_command: aec_pipewire.Command
 
     async def _start(self, conn: Connection, message: Message, arrived: float) -> None:
         request = parse_start(message.data)
@@ -183,7 +188,6 @@ class Starts:
             tool = capture.command[0]
             if (problem := check_tool(tool)) is not None:
                 raise RequestError("tool_unavailable", problem, tool=tool)
-            session_id = uuid.uuid4().hex
             session = Session(
                 config=setup.config,
                 capture=capture,
@@ -191,11 +195,8 @@ class Starts:
                 options=resolved.options,
                 emit=emit,
                 kind="system",
-                mic=self._mic_track(setup.config, session_id, capture)
-                if request.with_mic
-                else None,
+                mic=self._mic_track(setup.config, capture) if request.with_mic else None,
                 playback=self._speakers,
-                session_id=session_id,
             )
             self._running[cid] = Running(
                 conn, session, request.start.label, resolved.context_key, message.id, app=app
@@ -207,18 +208,45 @@ class Starts:
                 conn.client, make_session=make_session, session_label=request.start.label
             )
 
-    def _mic_track(self, config: Config, session_id: str, system: CaptureSource) -> CaptureSource:
-        """A system session's mic track: the mic with the speakers' sound taken out, when
-        `audio.echo_cancel` allows."""
-        mode = echo_cancel_mode(config.audio)
-        if mode == "builtin":
-            return BuiltinEchoCancelledMic(self.capture, system)
-        if mode != "pipewire" or not isinstance(self._sources, PwDumpScan):
+    def _mic_track(self, config: Config, system: CaptureSource) -> CaptureSource:
+        """A system session's mic track: the shared mic, which on PipeWire is already echo
+        cancelled, else through the built-in canceller when `audio.echo_cancel` asks."""
+        if (
+            isinstance(self.capture, EchoCancelledMic)
+            or echo_cancel_mode(config.audio) != "builtin"
+        ):
             return self.capture
-        aec = PipewireAec(
-            f"stt-daemon-aec-{session_id}", nodes=self._sources, command=self._aec_command
+        return BuiltinEchoCancelledMic(self.capture, system)
+
+    def _shared_mic(
+        self, mic: CaptureSource, config: Config, aec_command: aec_pipewire.Command
+    ) -> CaptureSource:
+        """The mic every consumer takes: on PipeWire, when `audio.echo_cancel` allows, the
+        echo-cancel module's source in front of `mic`. The module records the default input, so
+        an `audio.device` naming another device keeps the plain mic."""
+        if echo_cancel_mode(config.audio) != "pipewire" or not isinstance(
+            self._sources, PwDumpScan
+        ):
+            return mic
+        if config.audio.device not in DEFAULT_INPUTS:
+            log.warning(
+                "audio.device = %r: echo cancellation is off for the mic; it works on the "
+                "default input only",
+                config.audio.device,
+            )
+            return mic
+        sources = self._sources
+
+        def make_aec() -> PipewireAec:
+            return PipewireAec(f"stt-daemon-aec-{os.getpid()}", nodes=sources, command=aec_command)
+
+        return EchoCancelledMic(
+            mic,
+            make_aec,
+            cleaned=self._system_capture,
+            buffer_ms=config.audio.buffer_ms,
+            keep_open=mic.keep_open,
         )
-        return EchoCancelledMic(self.capture, aec, cleaned=self._system_capture)
 
     @contextlib.contextmanager
     def _starting(self, cid: str) -> Generator[None]:

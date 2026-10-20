@@ -72,13 +72,14 @@ class Server(Starts):
         an app's stream or not, and records the echo-cancelled mic; `aec_command` loads the
         echo-cancel module. Construct on the loop."""
         self.path = path
-        self.capture = capture
         self.setup = setup
         self._reload_setup = reload_setup
         self._system_capture = system_capture
         self._sources = sources or default_scan()
         self._sources.on_event = self._source_event
-        self._aec_command = aec_command
+        self._mic = capture
+        self.capture = self._shared_mic(capture, setup.config, aec_command)
+        capture = self.capture
         self._speakers = speakers
         """Recorded for backends that take a playback reference; None: never."""
         self._speakers_change: asyncio.Task[None] | None = None
@@ -117,6 +118,8 @@ class Server(Starts):
         os.chmod(self.path, 0o600)
         self._speech.start()
         self._sources.start()
+        if self.capture is not self._mic:
+            await self.capture.start()
         self._speakers_follow_setup()
         log.info("listening on %s", self.path)
 
@@ -133,6 +136,8 @@ class Server(Starts):
         if workers:
             await asyncio.wait(workers)
         await self._slot.shutdown()
+        if self.capture is not self._mic:
+            await self.capture.stop()
         if self._speakers is not None:
             if self._speakers_change is not None:
                 await asyncio.wait([self._speakers_change])

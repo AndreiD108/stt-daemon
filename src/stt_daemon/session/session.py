@@ -22,7 +22,7 @@ from collections.abc import Callable, Coroutine
 from dataclasses import replace
 from typing import Any, Literal
 
-from ..audio.aec_pipewire import EchoCancelledMic
+from ..audio.aec_mic import EchoCancelledMic
 from ..audio.capture import CaptureSource
 from ..audio.frames import Attachment, epoch_ms
 from ..audio.speakers import SpeakerMonitor
@@ -102,6 +102,7 @@ class Session:
         self._start_failure: OpenFailed | None = None
         """A link that gave up before `session_started`: the start fails with it."""
         self._finishing = False
+        self._unwatch: list[Callable[[], None]] = []
         self._ended: asyncio.Future[SessionEnded] = asyncio.get_running_loop().create_future()
         self._stream: ByteStreamCapture | None = None
         self._last_progress = 0.0
@@ -140,11 +141,9 @@ class Session:
                     playback=playback if kind == "mic" or name == "mic" else None,
                 )
             )
-            if isinstance(source, SystemCapture | EchoCancelledMic):
+            if isinstance(source, SystemCapture):
                 source.on_lost = self._capture_lost(name)
                 source.on_restored = self._capture_restored(name)
-            if isinstance(source, EchoCancelledMic):
-                source.on_unavailable = self._aec_unavailable(name)
         for track in self._tracks:
             track.segments.peers = [t.segments for t in self._tracks if t is not track]
         self._first = self._tracks[0]
@@ -200,8 +199,15 @@ class Session:
         self._emit(self.started)
         for track in self._tracks:
             capture = track.capture
-            if isinstance(capture, EchoCancelledMic) and capture.unavailable_reason:
-                self._aec_unavailable(track.name)(capture.unavailable_reason)
+            if isinstance(capture, EchoCancelledMic):
+                unwatch = capture.watch(
+                    on_lost=self._capture_lost(track.name),
+                    on_restored=self._capture_restored(track.name),
+                    on_unavailable=self._aec_unavailable(track.name),
+                )
+                self._unwatch.append(unwatch)
+                if capture.unavailable_reason:
+                    self._aec_unavailable(track.name)(capture.unavailable_reason)
             if isinstance(capture, SystemCapture | EchoCancelledMic) and capture.lost_reason:
                 self._capture_lost(track.name)(capture.lost_reason)
         return self.started
@@ -452,6 +458,8 @@ class Session:
             self._emit(segment)
         if error is not None:
             self._emit(error)
+        for unwatch in self._unwatch:
+            unwatch()
         for track in self._tracks:
             await track.capture.release()
             await track.release_playback()

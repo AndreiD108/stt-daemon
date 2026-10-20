@@ -292,11 +292,11 @@ until audio comes again: `session_error {code: "capture_restored", track, fatal:
 backend error on either track ends the session, with the text of both tracks. `session_started`
 waits up to 2 s for the first system audio; if none comes, `capture_lost` follows it.
 
-On Linux, the `mic` track has echo cancellation: PipeWire's echo-cancel module takes what the
-speakers play out of the mic, so the call's other side is not transcribed twice. When the module
-can't be loaded, or stops during the session, the track takes the plain mic and the client gets
-one `session_error {code: "aec_unavailable", track: "mic", fatal: false}`. On macOS, the daemon's
-own echo canceller does the same; it needs nothing installed.
+The `mic` track has echo cancellation, so the call's other side is not transcribed twice. On
+Linux it is the daemon's shared mic, already echo cancelled (see [Echo cancellation](#echo-cancellation));
+when that mic is the plain one, the client gets one `session_error {code: "aec_unavailable",
+track: "mic", fatal: false}`. On macOS, the daemon's own echo canceller takes the system track's
+audio out of the mic track; it needs nothing installed.
 
 With `app`, the track ends with the application's stream (the app closed, or stopped playing).
 The client gets `capture_lost`, and the daemon does not retry against the gone stream: it waits
@@ -492,7 +492,8 @@ sent during a slow start waits for the start; a `ping` doesn't).
   still starting (`since: null`), and that session in `backends`.
 - `mic_open`: the daemon keeps the mic open between sessions (config `audio.keep_mic_open`,
   default true). When false, the mic opens at each start: VAD events flow only during sessions,
-  sessions start at the command, and each start waits for the device.
+  sessions start at the command, and each start waits for the device, and on Linux for the
+  echo-cancel module to load (up to 2 s).
 - `sources`: the applications playing audio now; see [Sources](#sources). Always present, `[]`
   off Linux and macOS.
 
@@ -720,7 +721,8 @@ queue again); the audio kept meanwhile goes first. `suspended_seconds`: wall tim
 A backend failure during a session, or `internal` when the daemon fails. The daemon reopens a
 stalled mic by itself and doesn't report it here. In a `system` session, `track` names the track;
 the system track reports `capture_lost` and `capture_restored` here, and the mic track
-`aec_unavailable` (all non-fatal; see [`start_system_session`](#start_system_session)). A
+`aec_unavailable` (all non-fatal; see [`start_system_session`](#start_system_session)). A `mic`
+session gets `aec_unavailable` with no `track` (see [Echo cancellation](#echo-cancellation)). A
 suspended session whose backend a `reload` removed ends with `config`.
 
 - `fatal: true` is followed by `session_ended` (reason `error`) with every segment committed so far.
@@ -773,7 +775,7 @@ Codes of `error` replies, and of `session_error` for the backend codes.
 | `out_of_range` | `add_marker` | `at` is before `started_at`. |
 | `config` | `reload`; `session_error`, `fatal: true` | Config or credentials invalid; the last setup stays. In `session_error`: a `reload` removed the backend of a suspended session. |
 | `capture_lost`, `capture_restored` | `session_error`, `fatal: false` | A `system` session's track stopped getting audio, or gets it again; `track` names it. The session goes on. |
-| `aec_unavailable` | `session_error`, `fatal: false`, `track: "mic"` | The `mic` track of a `system` session takes the plain mic: echo cancellation could not start, or stopped. Sent once; the message says why and names the install command when something is missing. |
+| `aec_unavailable` | `session_error`, `fatal: false`; `track: "mic"` in a `system` session | The session takes the plain mic: echo cancellation could not start, or stopped. Sent once each time; the message says why and names the install command when something is missing. |
 | `internal` | any | The daemon failed; its log says why. |
 
 Backend codes come as the reply to a start command when the backend can't
@@ -796,6 +798,23 @@ the cause.
 "Retried" means the daemon reconnects; it still gives up after 3 failed reconnects, with that
 code and `fatal: true`. Act on `fatal`, not on the code. For an HTTP failure, `message` starts
 with the status and holds the provider's own text, as in `ElevenLabs HTTP 402: …`.
+
+## Echo cancellation
+
+On Linux, the mic every part of the daemon takes (`mic` sessions, the `mic` track of `system`
+sessions, the audio buffer before a start, VAD events) is PipeWire's echo-cancel source. The
+module takes what the speakers play out of the mic, with WebRTC's noise suppression, gain control
+and high-pass filter on. The daemon loads it through `pw-cli`: at startup when the mic is kept
+open (`mic_open`), else at each start. It shows in the system's sound settings as "Echo-cancelled
+mic (stt-daemon)". Config `audio.echo_cancel`: `auto` (default) and `pipewire` use it; `off` and
+`builtin` keep the plain mic, and `builtin` puts the daemon's own canceller on the `mic` track of
+`system` sessions only. The module records the system's default input, so with `audio.device`
+naming another device the mic stays plain. On macOS the shared mic is the plain mic.
+
+When the module can't load, or stops, the daemon takes the plain mic, and every session running or
+started meanwhile gets one `session_error {code: "aec_unavailable", fatal: false}` (`track: "mic"`
+in a `system` session) each time that happens; the message says why. With the mic kept open, the daemon loads the module
+again after 5 s, 30 s, then every minute, and goes back to its source once it loads.
 
 ## VAD events
 

@@ -13,7 +13,8 @@ import numpy as np
 import pytest
 
 from stt_daemon.audio.aec_builtin import BuiltinEchoCancelledMic
-from stt_daemon.audio.aec_pipewire import EchoCancelledMic, PipewireAec
+from stt_daemon.audio.aec_mic import EchoCancelledMic
+from stt_daemon.audio.aec_pipewire import PipewireAec
 from stt_daemon.audio.capture import CaptureSource, MicCapture
 from stt_daemon.audio.frames import Frame
 from stt_daemon.audio.pw_capture import PwRecordCapture, pw_record_command
@@ -172,8 +173,10 @@ async def test_the_built_in_canceller_against_the_pipewire_module_and_none(
     scan.start()
     module = EchoCancelledMic(
         mic,
-        PipewireAec("stt-daemon-aec-live-compare", nodes=scan),
+        lambda: PipewireAec("stt-daemon-aec-live-compare", nodes=scan),
         cleaned=lambda target: PwRecordCapture(target=target),
+        buffer_ms=5000,
+        keep_open=False,
     )
     builtin = BuiltinEchoCancelledMic(mic, system)
     sources: dict[str, CaptureSource] = {

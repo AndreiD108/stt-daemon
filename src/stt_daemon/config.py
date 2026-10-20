@@ -39,7 +39,7 @@ class AudioConfig:
     pre_start_ms: int = 1000
     chunk_ms: int = 200
     echo_cancel: str = "auto"
-    """For a system session's mic track: auto, pipewire, builtin or off."""
+    """auto, pipewire (the shared mic on Linux), builtin (system sessions' mic track) or off."""
 
 
 @dataclass

@@ -36,7 +36,8 @@ src/                      package source
       audiotee_capture.py  AudioteeCapture: audiotee on all output or one pid (macOS); permission hint on silence, its JSON error on exit
       aec.py              EchoCanceller: NumPy AEC per 10 ms block; GCC-PHAT delay, PBFDAF filter pair, double-talk guard, residual gain
       aec_builtin.py      BuiltinEchoCancelledMic: mic track through EchoCanceller, system capture as reference, paired by capture time
-      aec_pipewire.py     PipewireAec: echo-cancel module per session via pw-cli; EchoCancelledMic: mic track on its source, plain-mic fallback
+      aec_pipewire.py     PipewireAec: echo-cancel module via pw-cli (WebRTC NS, gain control, high-pass), node wait, unload
+      aec_mic.py          EchoCancelledMic: the shared mic on the module's source (Linux); plain-mic fallback, module reload, watchers
       vad.py              StreamingVAD: sherpa-onnx silero per window, own debounce, low-threshold edge lookback
       silero_vad.onnx     bundled silero VAD model (from sherpa-onnx releases)
       silero_vad.LICENSE  its MIT license
@@ -60,7 +61,7 @@ src/                      package source
       messages.py         JSONL envelope; per-command field checks → bad_request / invalid naming the field
       wire.py             session and VAD events → protocol event data (words, after_word only when asked)
       backend_set.py      Setup: backends set up here (plugins too), default, statuses, failure log; resolve a start (language, features, hints)
-      starts.py           Starts mixin: start_session, transcribe, start_system_session → sessions; start errors as replies
+      starts.py           Starts mixin: start_session, transcribe, start_system_session → sessions; start errors as replies; shared mic
       slot.py             Slot: mic slot idle/busy/evictable, takeover order, backend-only starts, dictation suspends / resumes, slot changes
       slot_state.py       Client, Holder, SlotState (wire form), StartRefused (busy / session_active details)
       backend_slots.py    BackendSlots: per-backend max_sessions, the sessions holding them, suspended ones
@@ -104,7 +105,7 @@ src/                      package source
 tests/
   aec_fixture.py          synthetic echo fixture: TTS far end through a synthetic room into TTS near end; writes WAVs
   conftest.py             marks tests/live as `live` (skipped by default); a temp XDG_DATA_HOME per test; `--dump-dir`
-  fake_pw_record.py       pw-record stand-in: WAV then silence in real time; exits, stalls, start log, exits when its target goes
+  fake_pw_record.py       pw-record stand-in: WAV then silence (or looped) in real time; exits, stalls, start log, exits when its target goes
   fake_audiotee.py        audiotee stand-in: its flags, WAV then silence in chunks, JSON stderr; pid not live, exit, stall, silent
   fake_pw_dump.py         pw-dump -m stand-in, and FakePipeWire: the test side that plays and stops streams, adds sources
   fake_pw_cli.py          pw-cli load-module stand-in: announces the echo-cancel source in a FakePipeWire; load error, exit, ignored TERM
@@ -134,13 +135,14 @@ tests/
     test_daemon_priority.py   transcribe suspended by a dictation: same output as unsuspended; blocked writer stalls no one
     test_daemon_system.py     system sessions on pw-record/audiotee stand-ins: two tracks, dictation beside, suspend/resume, fatal track, no tool, pid
     test_daemon_sources.py    sources in welcome and events (opt-in), app sessions, unknown app, re-attach (also while suspended)
-    test_daemon_aec.py        mic track on the echo-cancelled source; no module → plain mic, one aec_unavailable; pw-cli exit; built-in AEC
+    test_daemon_aec.py        module loaded at start (per session with the mic closed), all mic users on its source; no module, pw-cli exit, off; built-in AEC
     test_cli_daemon.py        key set reloads the daemon; listen prints segments, exit codes
     test_parakeet_daemon.py   `slow`, real model: commits at pauses, word times at speech edges, estimate vs real times, keyterms, two tracks
     test_parakeet_echo_gate.py  `slow`, real model: echo before a phrase not transcribed, speakers attached, word times through the cut; no-gate control
   live/                   opt-in (`pytest -m live`): real mic, real backend key
     test_elevenlabs_live.py  fixture to real EL: word times at the speech edges (realtime and upload), bad key
     test_aec_live.py      fixture through the speakers: cleaned source ≥ 10 dB below the mic; off / module / built-in side by side while you read
+    test_aec_module_live.py  module on null sinks, no speakers: two tracks keep the near end, mixed echo removed; gain control vs gate levels
 pyproject.toml            package, deps, ruff/pyright/pytest settings
 README.md                 public README: pitch, client features, install, backends, files, meetings, plugins
 ```
